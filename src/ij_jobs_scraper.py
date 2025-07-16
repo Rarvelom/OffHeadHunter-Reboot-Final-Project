@@ -11,6 +11,14 @@ import time
 import random
 import json
 import re
+import pymongo
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configuración del driver de Chrome no detectado
 USER_AGENTS = [
@@ -195,11 +203,72 @@ for card in offer_cards:
     }
     results.append(mongo_job)
 
-with open("src/jsons/jobs_ij.json", "w", encoding="utf-8") as f:
-    json.dump(results, f, ensure_ascii=False, indent=2)
+# MongoDB connection setup
+def get_mongodb_connection():
+    try:
+        # Get the connection string from environment variables
+        mongodb_uri = os.getenv('MONGODB_URI')
+        if not mongodb_uri:
+            raise ValueError("MONGODB_URI environment variable not set. Please check your .env file.")
+            
+        # Create a new client and connect to the server
+        client = MongoClient(mongodb_uri)
+        
+        # Test the connection
+        client.admin.command('ping')
+        print("✅ Successfully connected to MongoDB Atlas!")
+        
+        # Access the database and collection
+        db = client.get_database('offheadhunter_db')
+        return db['job_offers'], client
+        
+    except Exception as e:
+        print(f"❌ Error connecting to MongoDB: {e}")
+        return None, None
 
-print(f"Se han guardado {len(results)} ofertas en 'jobs_ij.json'")
+# Save to MongoDB
+def save_to_mongodb(jobs_data):
+    try:
+        collection, client = get_mongodb_connection()
+        if collection is None:
+            print("❌ Failed to connect to MongoDB. Data not saved.")
+            return
+        
+        success_count = 0
+        for job in jobs_data:
+            try:
+                # Use external_id as the _id in MongoDB to prevent duplicates
+                if job.get('external_id'):
+                    job['_id'] = job['external_id']
+                    # Update the document if it exists, otherwise insert it
+                    result = collection.update_one(
+                        {'_id': job['_id']},
+                        {'$set': job},
+                        upsert=True
+                    )
+                    if result.upserted_id:
+                        print(f"✅ Inserted new job: {job['_id']}")
+                    else:
+                        print(f"ℹ️  Updated existing job: {job['_id']}")
+                    success_count += 1
+            except DuplicateKeyError:
+                print(f"⚠️  Duplicate job found: {job.get('external_id')}")
+            except Exception as e:
+                print(f"❌ Error saving job {job.get('external_id')}: {e}")
+        
+        print(f"\n✅ Successfully processed {success_count} out of {len(jobs_data)} jobs to MongoDB.")
+        
+    except Exception as e:
+        print(f"❌ Unexpected error in save_to_mongodb: {e}")
+    finally:
+        # Ensure we close the MongoDB connection
+        if 'client' in locals() and client is not None:
+            client.close()
 
-time.sleep(2)
+# Save to MongoDB
+save_to_mongodb(results)
 
+# Close the browser
 driver.quit()
+
+print("Scraping completed and data saved to MongoDB.")

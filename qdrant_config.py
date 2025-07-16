@@ -29,47 +29,23 @@ def get_collection_configs():
     {
         "cv_embeddings": {
             "vectors_config": models.VectorParams,
-            "payload_schema": {
-                "user_id": models.PayloadSchemaType.KEYWORD,
-                "cv_id": models.PayloadSchemaType.KEYWORD,
-                "version": models.PayloadSchemaType.INTEGER,
-                "created_at": models.PayloadSchemaType.DATETIME
-            }
         },
         "job_embeddings": {
             "vectors_config": models.VectorParams,
-            "payload_schema": {
-                "job_id": models.PayloadSchemaType.KEYWORD,
-                "source_id": models.PayloadSchemaType.KEYWORD,
-                "created_at": models.PayloadSchemaType.DATETIME,
-                "is_active": models.PayloadSchemaType.INTEGER
-            }
         }
     }
     """
     return {
         "cv_embeddings": {
             "vectors_config": models.VectorParams(
-                size=1536,
+                size=768,  # Actualizado para coincidir con all-mpnet-base-v2
                 distance=models.Distance.COSINE
-            ),
-            "payload_schema": {
-                "user_id": models.PayloadSchemaType.KEYWORD,
-                "cv_id": models.PayloadSchemaType.KEYWORD,
-                "version": models.PayloadSchemaType.INTEGER,
-                "created_at": models.PayloadSchemaType.DATETIME
-            }
+            )
         },
         "job_embeddings": {
             "vectors_config": models.VectorParams(
-                size=1536,
+                size=768,  # Actualizado para coincidir con all-mpnet-base-v2
                 distance=models.Distance.COSINE
-            ),
-            "payload_schema": {
-                "job_id": models.PayloadSchemaType.KEYWORD,
-                "source_id": models.PayloadSchemaType.KEYWORD,
-                "created_at": models.PayloadSchemaType.DATETIME,
-                "is_active": models.PayloadSchemaType.INTEGER
-            }
+            )
         }
     }

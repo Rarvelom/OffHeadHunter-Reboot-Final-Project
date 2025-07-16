@@ -1,7 +1,7 @@
 from mongodb_schema import (
     users, job_sources, job_offers, cv_uploads, cv_rewrites,
     applications, notifications, activity_logs, job_matches,
-    chat_history, chat_memory   
+    chat_history, chat_memory, agent_test_queries   
 )
 from pymongo import IndexModel, ASCENDING, DESCENDING
 
@@ -83,6 +83,13 @@ def create_indexes():
         IndexModel([('user_id', ASCENDING)]),
         IndexModel([('action', ASCENDING)]),
         IndexModel([('timestamp', DESCENDING)])
+    ])
+
+    # Agent Test Queries indexes
+    agent_test_queries.create_indexes([
+        IndexModel([('session_id', ASCENDING)]),
+        IndexModel([('timestamp', DESCENDING)]),
+        IndexModel([('job_title', 'text')])  # Índice de texto para búsquedas en job_title
     ])
 
 def main():

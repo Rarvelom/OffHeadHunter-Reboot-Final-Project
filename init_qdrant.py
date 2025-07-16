@@ -16,17 +16,23 @@ def initialize_qdrant():
         # Get collection configurations
         configs = get_collection_configs()
         
-        # Create collections
+        # Get existing collections
+        existing_collections = client.get_collections().collections
+        existing_collection_names = [col.name for col in existing_collections]
+        
+        # Create collections if they don't exist
         for collection_name, config in configs.items():
             try:
-                client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=config["vectors_config"],
-                    payload_schema=config["payload_schema"]
-                )
-                print(f"{collection_name} collection created successfully!")
+                if collection_name not in existing_collection_names:
+                    client.create_collection(
+                        collection_name=collection_name,
+                        vectors_config=config["vectors_config"]
+                    )
+                    print(f"Collection '{collection_name}' created successfully!")
+                else:
+                    print(f"Collection '{collection_name}' already exists.")
             except Exception as e:
-                print(f"{collection_name} collection already exists or error: {str(e)}")
+                print(f"Error creating collection '{collection_name}': {str(e)}")
         
         print("Qdrant initialization completed successfully!")
         return client

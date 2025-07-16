@@ -179,6 +179,27 @@ class ChatMemory:
         {'chatHistory.role': 1, 'chatHistory.content': 1}  # Compound index for role and content queries
     ]
 
+class AgentTestQuery:
+    schema = {
+        'job_title': str,
+        'salary_expectation': str,  # Ejemplo: "35.000 - 45.000 EUR anuales"
+        'location': str,            # Ejemplo: "España o remoto"
+        'work_modality': str,       # Ejemplo: "Híbrido"
+        'timestamp': datetime,
+        'session_id': str,          # Identificador de sesión para agrupar consultas relacionadas
+        'metadata': {               # Campo para información adicional
+            'user_agent': Optional[str],
+            'ip_address': Optional[str],
+            'test_scenario': Optional[str]  # Para identificar diferentes escenarios de prueba
+        }
+    }
+    
+    indexes = [
+        {'session_id': 1},          # Índice para búsquedas por sesión
+        {'timestamp': -1},          # Índice para ordenar por fecha descendente
+        {'job_title': 'text'}       # Índice de texto para búsquedas en job_title
+    ]
+
 # Collections
 users = db['users']
 job_sources = db['job_sources']
@@ -191,3 +212,4 @@ notifications = db['notifications']
 activity_logs = db['activity_logs']
 chat_history = db['chat_history']  # Keep old collection
 chat_memory = db['chat_memory']  # Add new collection
+agent_test_queries = db['agent_test_queries']
