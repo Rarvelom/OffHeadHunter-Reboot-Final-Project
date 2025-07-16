@@ -1,5 +1,5 @@
 /offheadhunter_env
-/src/testing_jsons
+/src/testing/
 src/testing.py
 src/prettify.py
 .env
