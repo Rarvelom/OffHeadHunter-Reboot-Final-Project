@@ -1,5 +1,6 @@
 /offheadhunter_env
+/src/testing_jsons
 src/testing.py
-src/testing2.py
+src/prettify.py
 .env
 __pycache__
