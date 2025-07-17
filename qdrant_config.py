@@ -2,6 +2,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from dotenv import load_dotenv
 import os
+from qdrant_client.http.models import PayloadSchemaType
 
 # Load environment variables
 load_dotenv()
@@ -38,13 +39,13 @@ def get_collection_configs():
     return {
         "cv_embeddings": {
             "vectors_config": models.VectorParams(
-                size=768,  # Actualizado para coincidir con all-mpnet-base-v2
-                distance=models.Distance.COSINE
+                size=768,  # Dimensión para los embeddings
+                distance=models.Distance.COSINE,
             )
         },
         "job_embeddings": {
             "vectors_config": models.VectorParams(
-                size=768,  # Actualizado para coincidir con all-mpnet-base-v2
+                size=768,  # Dimensión para los embeddings
                 distance=models.Distance.COSINE
             )
         }

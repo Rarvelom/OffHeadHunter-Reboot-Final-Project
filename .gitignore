@@ -4,3 +4,4 @@ src/testing.py
 src/prettify.py
 .env
 __pycache__
+delete_job_embeddings.py

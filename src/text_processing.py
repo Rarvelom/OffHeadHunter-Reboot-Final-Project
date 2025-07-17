@@ -1,28 +1,38 @@
 import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+from typing import List, Optional, Dict, Any, Union
+import logging
 import re
-from typing import List, Dict, Any, Optional, Union
 from pathlib import Path
 import PyPDF2
 from docx import Document
 import tiktoken
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from unstructured.partition.auto import partition
+
+# Cargar variables de entorno
+load_dotenv()
+
+# Configurar la API key de Google
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+if not GOOGLE_API_KEY:
+    raise ValueError("No se encontró GOOGLE_API_KEY en las variables de entorno")
+
+genai.configure(api_key=GOOGLE_API_KEY)
 
 class TextProcessor:
-    def __init__(self, model_name: str = 'all-mpnet-base-v2'):
+    def __init__(self, model_name: str = 'text-embedding-004'):
         """
-        Inicializa el procesador de texto con un modelo de embeddings.
+        Inicializa el procesador de texto con el modelo de embeddings de Google Generative AI.
         
         Args:
-            model_name: Nombre del modelo de Sentence Transformers a utilizar.
-                       Por defecto usa 'all-mpnet-base-v2' que genera vectores de 768 dimensiones.
-                       Es un modelo de alta calidad que funciona bien para tareas de búsqueda semántica.
+            model_name: Nombre del modelo de embeddings de Google a utilizar.
+                     Por defecto usa 'text-embedding-004' que es compatible con Gemini 2.5 Flash.
         """
-        self.model = SentenceTransformer(model_name)
+        self.model_name = model_name
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
         
-    def extract_text_from_file(self, file_path: Union[str, Path]) -> str:
+    def extract_text_from_file(self, file_path: Path) -> str:
         """
         Extrae texto de un archivo (PDF, DOCX, o TXT).
         
@@ -58,66 +68,12 @@ class TextProcessor:
         except Exception as e:
             raise Exception(f"Error al extraer texto de {file_path}: {str(e)}")
     
-    def chunk_text(
-        self, 
-        text: str, 
-        chunk_size: int = 1000, 
-        chunk_overlap: int = 200,
-        separator: str = "\n"
-    ) -> List[Dict[str, Any]]:
-        """
-        Divide el texto en fragmentos (chunks) de tamaño manejable para procesamiento.
-        
-        Args:
-            text: Texto a dividir.
-            chunk_size: Tamaño máximo de cada chunk en tokens.
-            chunk_overlap: Número de tokens de superposición entre chunks consecutivos.
-            separator: Carácter o cadena para unir los chunks.
-            
-        Returns:
-            Lista de diccionarios con los chunks y sus metadatos.
-        """
-        # Tokenizar el texto
-        tokens = self.tokenizer.encode(text, disallowed_special=())
-        
-        chunks = []
-        start_idx = 0
-        
-        while start_idx < len(tokens):
-            # Calcular el índice final del chunk actual
-            end_idx = min(start_idx + chunk_size, len(tokens))
-            
-            # Decodificar los tokens a texto
-            chunk_tokens = tokens[start_idx:end_idx]
-            chunk_text = self.tokenizer.decode(chunk_tokens)
-            
-            # Agregar el chunk a la lista
-            chunks.append({
-                "text": chunk_text,
-                "start_token": start_idx,
-                "end_token": end_idx - 1,
-                "num_tokens": len(chunk_tokens)
-            })
-            
-            # Si hemos llegado al final, terminar
-            if end_idx == len(tokens):
-                break
-                
-            # Mover el índice de inicio, teniendo en cuenta el solapamiento
-            start_idx = end_idx - chunk_overlap
-            
-            # Asegurarse de que no retrocedemos
-            if start_idx < end_idx - chunk_overlap:
-                start_idx = end_idx - chunk_overlap
-        
-        return chunks
-    
     def generate_embeddings(self, texts: Union[str, List[str]], batch_size: int = 32) -> np.ndarray:
         """
-        Genera embeddings para uno o más textos.
+        Genera embeddings para uno o más textos utilizando Google Generative AI.
         
         Args:
-            texts: Texto o lista de textos a vectorizar.
+            texts: Texto o lista de textos a convertir en embeddings.
             batch_size: Tamaño del lote para procesamiento por lotes.
             
         Returns:
@@ -126,19 +82,62 @@ class TextProcessor:
         if isinstance(texts, str):
             texts = [texts]
             
-        # Generar embeddings
-        embeddings = self.model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=True,
-            convert_to_numpy=True
-        )
+        all_embeddings = []
         
-        return embeddings
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            try:
+                response = genai.embed_content(
+                    model=f"models/{self.model_name}",
+                    content=batch,
+                    task_type="retrieval_document",
+                    title="Document chunk"
+                )
+                batch_embeddings = [np.array(embedding['values']) for embedding in response['embedding']]
+                all_embeddings.extend(batch_embeddings)
+            except Exception as e:
+                print(f"Error generando embeddings para el lote {i//batch_size + 1}: {str(e)}")
+                # Añadir arrays de ceros del tamaño esperado para mantener la consistencia
+                expected_dim = 768  # Dimensión estándar para text-embedding-004
+                all_embeddings.extend([np.zeros(expected_dim)] * len(batch))
+        
+        return np.array(all_embeddings)
+    
+    def chunk_text(self, text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> List[Dict[str, Any]]:
+        """
+        Divide el texto en chunks con solapamiento.
+        
+        Args:
+            text: Texto a dividir.
+            chunk_size: Tamaño máximo de cada chunk en tokens.
+            chunk_overlap: Número de tokens de solapamiento entre chunks.
+            
+        Returns:
+            Lista de diccionarios con los chunks y sus metadatos.
+        """
+        tokens = self.tokenizer.encode(text)
+        chunks = []
+        
+        for i in range(0, len(tokens), chunk_size - chunk_overlap):
+            chunk_tokens = tokens[i:i + chunk_size]
+            chunk_text = self.tokenizer.decode(chunk_tokens)
+            
+            chunks.append({
+                'text': chunk_text,
+                'tokens': chunk_tokens,
+                'num_tokens': len(chunk_tokens),
+                'start_token': i,
+                'end_token': min(i + chunk_size, len(tokens))
+            })
+            
+            if i + chunk_size >= len(tokens):
+                break
+                
+        return chunks
     
     def process_document(
         self, 
-        file_path: Union[str, Path], 
+        file_path: Path, 
         chunk_size: int = 1000, 
         chunk_overlap: int = 200
     ) -> List[Dict[str, Any]]:
@@ -148,7 +147,7 @@ class TextProcessor:
         Args:
             file_path: Ruta al archivo a procesar.
             chunk_size: Tamaño máximo de cada chunk en tokens.
-            chunk_overlap: Número de tokens de superposición entre chunks consecutivos.
+            chunk_overlap: Número de tokens de solapamiento entre chunks.
             
         Returns:
             Lista de diccionarios con los chunks, sus metadatos y embeddings.
@@ -156,19 +155,17 @@ class TextProcessor:
         # Extraer texto
         text = self.extract_text_from_file(file_path)
         
-        # Dividir en chunks
+        # Dividir el texto en chunks
         chunks = self.chunk_text(text, chunk_size, chunk_overlap)
         
-        # Extraer solo los textos para generar embeddings
-        chunk_texts = [chunk["text"] for chunk in chunks]
-        
-        # Generar embeddings para todos los chunks
-        embeddings = self.generate_embeddings(chunk_texts)
+        # Generar embeddings para cada chunk
+        texts = [chunk['text'] for chunk in chunks]
+        embeddings = self.generate_embeddings(texts)
         
         # Añadir los embeddings a los chunks
-        for i, chunk in enumerate(chunks):
-            chunk["embedding"] = embeddings[i].tolist()
-        
+        for i, embedding in enumerate(embeddings):
+            chunks[i]['embedding'] = embedding.tolist()
+            
         return chunks
 
 
