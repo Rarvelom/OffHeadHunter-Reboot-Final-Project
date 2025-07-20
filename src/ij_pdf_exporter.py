@@ -32,7 +32,6 @@ def export_ij_offer_to_pdf(offer_url, output_pdf="oferta_infojobs.pdf"):
                 EC.element_to_be_clickable((By.ID, "didomi-notice-disagree-button"))
             )
             disagree_button.click()
-            # Espera a que el popup desaparezca (Dejar el parametro timeout SIEMPRE a 5! Menos tiempo no funciona)
             WebDriverWait(driver, 3).until(
                 EC.invisibility_of_element_located((By.ID, "didomi-notice-disagree-button"))
             )
@@ -51,20 +50,18 @@ def export_ij_offer_to_pdf(offer_url, output_pdf="oferta_infojobs.pdf"):
             "paperHeight": 11.69,
         })
         
-        # Asegúrate de que la carpeta pdf/ existe
-        os.makedirs("pdf", exist_ok=True)
-        pdf_path = os.path.join("pdf", output_pdf)
-        # Guardar el PDF generado en la carpeta pdf/
+        # Asegúrate de que la carpeta src/testing/pdfs existe
+        output_dir = "src/testing/pdfs"
+        os.makedirs(output_dir, exist_ok=True)
+        pdf_path = os.path.join(output_dir, output_pdf)
+        # Guardar el PDF generado en la carpeta pdfs/
         with open(pdf_path, "wb") as f:
             f.write(base64.b64decode(pdf['data']))
         print(f"PDF guardado como {pdf_path}")
-    
+
     except Exception as e:
         print(f"Error al guardar el PDF: {e}")
 
     finally:
         time.sleep(1)
         driver.quit()
-
-# Ejemplo de uso:
-export_ij_offer_to_pdf("https://www.infojobs.net/belmonte-de-miranda/tecnico-prl/of-ib3308c330d429791e381a092ed88ad")
