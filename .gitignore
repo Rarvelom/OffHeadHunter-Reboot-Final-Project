@@ -2,5 +2,5 @@
 /src/testing/
 src/testing.py
 src/prettify.py
-#.env
+.env
 __pycache__
