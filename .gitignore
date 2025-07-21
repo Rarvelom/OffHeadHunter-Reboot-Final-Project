@@ -4,3 +4,5 @@ src/testing.py
 src/prettify.py
 .env
 __pycache__
+job_search_agent.backup.py
+Update_job_embeddings.py

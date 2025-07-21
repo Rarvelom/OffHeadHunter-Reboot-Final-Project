@@ -1,196 +1,309 @@
 import os
 import sys
 import argparse
-import csv
 import json
+import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 from dotenv import load_dotenv
 
-# Añadir el directorio src al path para poder importar los módulos
+# Add src directory to path
 sys.path.append(str(Path(__file__).parent))
 
 from src.text_processing import TextProcessor
-from src.qdrant_storage import QdrantStorage
+from src.unified_storage import UnifiedStorage
+from src.pdf_processor import PDFProcessor
 
-# Cargar variables de entorno
+# Load environment variables
 load_dotenv()
 
-def process_csv_file(
+def process_pdf_file(
     file_path: Union[str, Path],
     collection_name: str = "cv_embeddings",
     user_id: str = None,
-    text_column: str = "Resume",
-    metadata_columns: List[str] = ["Category"],
-    chunk_size: int = 800,
-    chunk_overlap: int = 100,
-    batch_size: int = 32
+    document_type: str = "cv",
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    batch_size: int = 32,
+    source: str = "cv_upload"
 ) -> Dict[str, Any]:
     """
-    Procesa un archivo CSV con CVs y almacena los embeddings en Qdrant.
+    Process a PDF file (CV or job posting) and store its embeddings in MongoDB and Qdrant.
     
     Args:
-        file_path: Ruta al archivo CSV.
-        collection_name: Nombre de la colección de Qdrant.
-        user_id: ID del usuario propietario de los documentos.
-        text_column: Nombre de la columna que contiene el texto del CV.
-        metadata_columns: Lista de columnas a incluir como metadatos.
-        chunk_size: Tamaño máximo de cada chunk en tokens.
-        chunk_overlap: Número de tokens de superposición entre chunks.
-        batch_size: Tamaño del lote para procesar los embeddings.
+        file_path: Path to the PDF file.
+        collection_name: Name of the collection to store embeddings in.
+        user_id: ID of the user who owns the documents.
+        document_type: Type of document ('cv' or 'job').
+        chunk_size: Maximum size of each chunk in tokens.
+        chunk_overlap: Number of overlapping tokens between chunks.
+        batch_size: Batch size for processing embeddings.
+        source: Source of the documents (e.g., 'cv_upload', 'job_posting').
         
     Returns:
-        Diccionario con información sobre el procesamiento.
+        Dictionary with processing information.
     """
     file_path = Path(file_path)
     if not file_path.exists():
-        return {"success": False, "error": f"El archivo {file_path} no existe."}
+        return {"success": False, "error": f"File {file_path} does not exist."}
+    
+    if file_path.suffix.lower() != '.pdf':
+        return {"success": False, "error": f"File {file_path} is not a PDF."}
     
     try:
-        # Inicializar el procesador de texto y el almacenamiento
-        processor = TextProcessor()
-        storage = QdrantStorage(collection_name=collection_name)
+        # Initialize text processor, PDF processor, and storage
+        text_processor = TextProcessor()
+        pdf_processor = PDFProcessor(extract_metadata=True)
+        storage = UnifiedStorage(
+            collection_name=collection_name,
+            user_id=user_id
+        )
         
-        # Leer el archivo CSV
-        with open(file_path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
+        # Process the PDF file
+        print(f"Processing PDF: {file_path.name}")
+        pdf_data = pdf_processor.process_pdf(file_path)
         
-        if not rows:
-            return {"success": False, "error": f"El archivo {file_path} está vacío o no contiene datos válidos."}
+        # Extract text and metadata
+        text = pdf_data.get('text', '').strip()
+        if not text:
+            return {"success": False, "error": f"No text could be extracted from {file_path}"}
         
-        # Verificar que existe la columna de texto
-        if text_column not in rows[0]:
-            return {"success": False, "error": f"La columna de texto '{text_column}' no existe en el archivo CSV."}
+        # Get metadata from PDF or use defaults
+        metadata = pdf_data.get('metadata', {})
+        metadata.update({
+            'file_name': file_path.name,
+            'file_path': str(file_path),
+            'document_type': document_type,
+            'num_pages': pdf_data.get('num_pages', 0),
+            'user_id': user_id
+        })
         
-        total_chunks = 0
-        processed_rows = 0
+        # Split text into chunks
+        chunks = text_processor.split_into_chunks(
+            text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap
+        )
         
-        # Procesar cada fila del CSV
-        for row in rows:
-            try:
-                # Extraer el texto principal
-                text = row[text_column].strip()
-                if not text:
-                    print(f"Advertencia: Fila {processed_rows + 1} tiene texto vacío. Se omite.")
-                    continue
-                
-                # Extraer metadatos
-                metadata = {col: row.get(col, "") for col in metadata_columns if col in row}
-                
-                # Procesar el texto en chunks
-                chunks = processor.chunk_text(
-                    text=text,
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap
-                )
-                
-                if not chunks:
-                    print(f"Advertencia: No se pudieron extraer chunks de la fila {processed_rows + 1}.")
-                    continue
-                
-                # Generar embeddings para los chunks
-                chunk_texts = [chunk["text"] for chunk in chunks]
-                embeddings = processor.generate_embeddings(chunk_texts, batch_size=batch_size)
-                
-                # Añadir los embeddings a los chunks
-                for i, chunk in enumerate(chunks):
-                    chunk["embedding"] = embeddings[i].tolist()
-                
-                # Crear un ID único para el documento
-                doc_id = f"cv_{processed_rows}_{os.urandom(4).hex()}"
-                
-                # Almacenar los chunks en Qdrant
-                stored_ids = storage.store_embeddings(
-                    document_id=doc_id,
-                    chunks=chunks,
-                    metadata={
-                        "source": file_path.name,
-                        "row_index": processed_rows,
-                        **metadata
-                    },
-                    user_id=user_id
-                )
-                
-                total_chunks += len(stored_ids)
-                processed_rows += 1
-                
-                if processed_rows % 10 == 0:
-                    print(f"Procesadas {processed_rows} filas, {total_chunks} chunks almacenados...")
-                
-            except Exception as e:
-                print(f"Error procesando la fila {processed_rows + 1}: {str(e)}")
-                continue
+        total_chunks = len(chunks)
+        print(f"Document split into {total_chunks} chunks")
+        
+        # Process each chunk
+        for i, chunk in enumerate(chunks):
+            # Generate a unique ID for the chunk
+            document_id = f"{file_path.stem}-chunk-{i}"
+            
+            # Generate embedding for the chunk
+            embedding = text_processor.embed_text(chunk)
+            
+            # Add chunk-specific metadata
+            chunk_metadata = metadata.copy()
+            chunk_metadata.update({
+                'chunk_index': i,
+                'total_chunks': total_chunks,
+                'chunk_size': len(chunk.split())  # Approximate word count
+            })
+            
+            # Store in MongoDB and Qdrant
+            storage.store_embedding(
+                text=chunk,
+                embedding=embedding,
+                document_id=document_id,
+                metadata=chunk_metadata,
+                source=source
+            )
+            
+            if (i + 1) % 10 == 0 or (i + 1) == total_chunks:
+                print(f"Processed chunk {i + 1}/{total_chunks}")
         
         return {
             "success": True,
-            "processed_rows": processed_rows,
-            "total_chunks": total_chunks,
+            "total_documents_processed": total_chunks,
             "collection_name": collection_name,
-            "file_path": str(file_path)
+            "storage_backends": ["mongodb", "qdrant"],
+            "document_type": document_type,
+            "file_name": file_path.name
         }
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {
             "success": False,
-            "error": f"Error al procesar el archivo CSV: {str(e)}",
-            "file_path": str(file_path)
+            "error": f"Error processing file {file_path}: {str(e)}"
         }
 
+def process_pdf_directory(
+    directory: Union[str, Path],
+    collection_name: str = "cv_embeddings",
+    user_id: str = None,
+    document_type: str = "cv",
+    recursive: bool = False,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Process all PDF files in a directory.
+    
+    Args:
+        directory: Directory containing PDF files.
+        collection_name: Name of the collection to store embeddings in.
+        user_id: ID of the user who owns the documents.
+        document_type: Type of documents ('cv' or 'job').
+        recursive: Whether to process subdirectories.
+        **kwargs: Additional arguments to pass to process_pdf_file.
+        
+    Returns:
+        Dictionary with processing summary.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return {"success": False, "error": f"Directory {directory} does not exist."}
+    
+    # Find all PDF files
+    pattern = "**/*.pdf" if recursive else "*.pdf"
+    pdf_files = list(directory.glob(pattern))
+    
+    if not pdf_files:
+        return {"success": False, "error": f"No PDF files found in {directory}"}
+    
+    print(f"Found {len(pdf_files)} PDF files to process")
+    
+    results = []
+    
+    # Process each PDF file
+    for i, pdf_file in enumerate(pdf_files, 1):
+        print(f"\nProcessing file {i}/{len(pdf_files)}: {pdf_file.name}")
+        
+        result = process_pdf_file(
+            file_path=pdf_file,
+            collection_name=collection_name,
+            user_id=user_id,
+            document_type=document_type,
+            **kwargs
+        )
+        
+        results.append({
+            'file': str(pdf_file),
+            'success': result['success'],
+            'chunks_processed': result.get('total_documents_processed', 0) if result['success'] else 0,
+            'error': result.get('error')
+        })
+    
+    # Calculate summary statistics
+    successful = sum(1 for r in results if r['success'])
+    failed = len(results) - successful
+    total_chunks = sum(r['chunks_processed'] for r in results if r['success'])
+    
+    return {
+        "success": True,
+        "files_processed": len(results),
+        "files_successful": successful,
+        "files_failed": failed,
+        "total_chunks_processed": total_chunks,
+        "collection_name": collection_name,
+        "document_type": document_type,
+        "results": results
+    }
+
 def main():
-    # Configurar el parser de argumentos
-    parser = argparse.ArgumentParser(description="Procesar documentos y almacenar sus embeddings en Qdrant.")
-    parser.add_argument("path", help="Ruta al archivo o directorio a procesar")
-    parser.add_argument("--collection", "-c", default="cv_embeddings", 
-                       help="Nombre de la colección de Qdrant (por defecto: cv_embeddings)")
-    parser.add_argument("--user-id", "-u", default=None, 
-                       help="ID del usuario propietario de los documentos")
-    parser.add_argument("--text-column", default="Resume",
-                       help="Nombre de la columna que contiene el texto (para archivos CSV)")
-    parser.add_argument("--metadata-columns", nargs="+", default=["Category"],
-                       help="Columnas a incluir como metadatos (para archivos CSV)")
-    parser.add_argument("--chunk-size", type=int, default=800,
-                       help="Tamaño máximo de cada chunk en tokens (por defecto: 800)")
-    parser.add_argument("--chunk-overlap", type=int, default=100,
-                       help="Número de tokens de superposición entre chunks (por defecto: 100)")
-    parser.add_argument("--batch-size", type=int, default=32,
-                       help="Tamaño del lote para procesar los embeddings (por defecto: 32)")
+    parser = argparse.ArgumentParser(description='Process PDF documents and generate embeddings.')
+    
+    # Input options
+    input_group = parser.add_argument_group('Input Options')
+    input_group.add_argument('path', type=str, 
+                           help='Path to PDF file or directory containing PDFs')
+    input_group.add_argument('--recursive', '-r', action='store_true',
+                           help='Process PDFs in subdirectories recursively')
+    
+    # Document type options
+    type_group = parser.add_argument_group('Document Type')
+    type_group.add_argument('--document-type', type=str, choices=['cv', 'job'], default='cv',
+                          help='Type of documents being processed (default: cv)')
+    type_group.add_argument('--source', type=str, default='cv_upload',
+                          help='Source identifier (e.g., cv_upload, job_posting)')
+    
+    # Processing options
+    process_group = parser.add_argument_group('Processing Options')
+    process_group.add_argument('--collection', type=str, default='cv_embeddings',
+                             help='Collection name for storing embeddings (default: cv_embeddings)')
+    process_group.add_argument('--user-id', type=str, default=None,
+                             help='ID of the user who owns the documents')
+    process_group.add_argument('--chunk-size', type=int, default=1000,
+                             help='Maximum tokens per chunk (default: 1000)')
+    process_group.add_argument('--overlap', type=int, default=200,
+                             help='Overlap between chunks in tokens (default: 200)')
+    process_group.add_argument('--batch-size', type=int, default=32,
+                             help='Batch size for processing embeddings (default: 32)')
     
     args = parser.parse_args()
     
-    # Procesar la ruta (archivo o directorio)
-    path = Path(args.path)
-    if not path.exists():
-        print(f"Error: La ruta {path} no existe.")
-        sys.exit(1)
+    print("\n" + "="*70)
+    print(f"Starting document processing for {args.path}")
+    print("-" * 70)
+    print(f"Document type: {args.document_type.upper()}")
+    print(f"Source: {args.source}")
+    print(f"Collection: {args.collection}")
+    print(f"User ID: {args.user_id or 'Not specified'}")
+    print(f"Chunk size: {args.chunk_size} tokens")
+    print(f"Chunk overlap: {args.overlap} tokens")
+    print(f"Batch size: {args.batch_size}")
+    print("="*70 + "\n")
     
-    # Determinar si es un archivo CSV
-    if path.is_file() and path.suffix.lower() == '.csv':
-        result = process_csv_file(
-            file_path=path,
+    # Determine if input is a file or directory
+    input_path = Path(args.path)
+    
+    if input_path.is_file() and input_path.suffix.lower() == '.pdf':
+        # Process a single PDF file
+        result = process_pdf_file(
+            file_path=input_path,
             collection_name=args.collection,
             user_id=args.user_id,
-            text_column=args.text_column,
-            metadata_columns=args.metadata_columns,
+            document_type=args.document_type,
             chunk_size=args.chunk_size,
-            chunk_overlap=args.chunk_overlap,
-            batch_size=args.batch_size
+            chunk_overlap=args.overlap,
+            batch_size=args.batch_size,
+            source=args.source
         )
-        
-        if result["success"]:
-            print("\n" + "="*50)
-            print("Procesamiento completado con éxito!")
-            print(f"Archivo: {result['file_path']}")
-            print(f"Filas procesadas: {result['processed_rows']}")
-            print(f"Total de chunks almacenados: {result['total_chunks']}")
-            print(f"Colección: {result['collection_name']}")
-            print("="*50)
-        else:
-            print(f"\nError: {result.get('error', 'Error desconocido')}")
-            sys.exit(1)
+    elif input_path.is_dir():
+        # Process a directory of PDFs
+        result = process_pdf_directory(
+            directory=input_path,
+            collection_name=args.collection,
+            user_id=args.user_id,
+            document_type=args.document_type,
+            recursive=args.recursive,
+            chunk_size=args.chunk_size,
+            chunk_overlap=args.overlap,
+            batch_size=args.batch_size,
+            source=args.source
+        )
     else:
-        print("Este script actualmente solo soporta archivos CSV.")
-        print("Para otros tipos de archivos, use el script original process_documents.py")
+        print(f"Error: {input_path} is not a valid PDF file or directory")
+        sys.exit(1)
+    
+    # Print results
+    print("\n" + "="*70)
+    print("PROCESSING COMPLETE")
+    print("-" * 70)
+    
+    if result.get('success', False):
+        if 'files_processed' in result:  # Directory processing result
+            print(f"Files processed: {result['files_processed']}")
+            print(f"  ✓ Successful: {result['files_successful']}")
+            print(f"  ✗ Failed: {result['files_failed']}")
+            print(f"Total chunks processed: {result['total_chunks_processed']}")
+        else:  # Single file processing result
+            print(f"File: {result.get('file_name', 'Unknown')}")
+            print(f"Chunks processed: {result.get('total_documents_processed', 0)}")
+        
+        print(f"\nCollection: {result['collection_name']}")
+        print(f"Storage backends: {', '.join(result.get('storage_backends', ['mongodb', 'qdrant']))}")
+    else:
+        print(f"ERROR: {result.get('error', 'Unknown error occurred')}")
+    
+    print("="*70 + "\n")
+    
+    if not result.get('success', False):
         sys.exit(1)
 
 if __name__ == "__main__":
