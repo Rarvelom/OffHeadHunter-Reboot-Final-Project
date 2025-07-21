@@ -38,13 +38,17 @@ def get_collection_configs():
     return {
         "cv_embeddings": {
             "vectors_config": models.VectorParams(
-                size=768,  # Actualizado para coincidir con all-mpnet-base-v2
+                size=768,  # Dimensión para los embeddings (all-mpnet-base-v2 output)
                 distance=models.Distance.COSINE
             )
         },
         "job_embeddings": {
             "vectors_config": models.VectorParams(
+<<<<<<< HEAD
                 size=768,  # Actualizado para coincidir con all-mpnet-base-v2
+=======
+                size=768,  # Dimensión para los embeddings (all-mpnet-base-v2 output)
+>>>>>>> 7d37cce (WIP: Changes before sync with remote)
                 distance=models.Distance.COSINE
             )
         }

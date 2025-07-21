@@ -1,10 +1,14 @@
 import os
 import json
-from typing import Dict, Any, Optional, List
-from pymongo import MongoClient
-from dotenv import load_dotenv
-from bson.binary import Binary
+import uuid
 from datetime import datetime
+from typing import Dict, List, Optional, Any, Union
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from qdrant_client import QdrantClient, models
+from sentence_transformers import SentenceTransformer
+from unstructured.partition.auto import partition
+from bson.binary import Binary
 import google.generativeai as genai
 
 SYSTEM_PROMPT = """Actúa como un asistente laboral inteligente para OffHeadHunter.
@@ -67,7 +71,7 @@ class JobSearchAgent:
         self.llm = LLMService()
         
         # Initialize MongoDB connection
-        mongo_uri = os.getenv("MONGO_URI")
+        mongo_uri = os.getenv("MONGODB_URI")
         if not mongo_uri:
             print("Error: MONGO_URI no encontrada en el archivo .env")
             print("Añade la línea: MONGO_URI=mongodb://localhost:27017/")
@@ -75,12 +79,25 @@ class JobSearchAgent:
 
         try:
             self.client = MongoClient(mongo_uri)
+            self.qdrant_url = os.getenv("QDRANT_URL")
+            self.qdrant_api_key = os.getenv("QDRANT_API_KEY")
+            if not self.qdrant_url or not self.qdrant_api_key:
+                print("QDRANT_URL and QDRANT_API_KEY must be set.")
+            else:
+                self.qdrant_client = QdrantClient(
+                    url=self.qdrant_url,
+                    api_key=self.qdrant_api_key,
+                )
+            self.embedding_model = SentenceTransformer('all-mpnet-base-v2')
+
             self.db = self.client["offheadhunter_db"]
             # Usando las colecciones especificadas
             self.profiles_collection = self.db["agent_test_queries"]  # Para perfiles de usuario
             self.cv_uploads = self.db["cv_uploads"]  # Para CVs
-            self.user_id = "local_user_profile"  # ID para pruebas locales
+            # Generar un ID único para cada nuevo perfil
+            self.user_id = f"user_{str(uuid.uuid4())}"  # ID único para cada perfil
             self.user_profile = {}
+            print(f"ID de perfil generado: {self.user_id}")
             print("¡Conexión con MongoDB exitosa!")
             print(f"Base de datos: offheadhunter_db")
             print(f"Colección de perfiles: agent_test_queries")
@@ -108,7 +125,7 @@ class JobSearchAgent:
             },
             {
                 "key": "work_modality",
-                "question": "¿En qué modalidad prefieres trabajar? (Presencial, Híbrido o A distancia)",
+                "question": "¿En qué modalidad prefieres trabajar? (Presencial, Híbrido, A distancia)",
                 "description": "Modalidad de trabajo"
             }
         ]
@@ -182,18 +199,87 @@ class JobSearchAgent:
                 with open(cv_path, 'rb') as file:
                     file_data = file.read()
                 
-                # Prepare CV document for MongoDB
+                # Extract text from file
+                elements = partition(cv_path)
+                cv_text = "\n".join([str(el) for el in elements])
+
+                # Prepare CV document for MongoDB with all required fields
                 cv_document = {
                     'user_id': self.user_id,
-                    'file_name': os.path.basename(cv_path),
-                    'file_data': Binary(file_data),
-                    'upload_date': datetime.utcnow(),
-                    'file_type': file_ext[1:],  # Remove the dot
-                    'file_size': len(file_data)
+                    'filename': os.path.basename(cv_path),
+                    'file_url': f"file://{cv_path}",  # Store the file path as URL
+                    'original_text': cv_text,
+                    'version': 1,  # Initial version
+                    'vectorized': False,  # Will be updated after Qdrant save
+                    'uploaded_at': datetime.utcnow(),
+                    'status': 'pending',
+                    'metadata': {
+                        'file_size': len(file_data),
+                        'file_type': file_ext[1:],  # Remove the dot
+                        'pages': len(cv_text.split('\n'))  # Estimate pages
+                    }
                 }
                 
-                # Save to MongoDB
+                # Save to Qdrant first to get the vector ID
+                filename = os.path.basename(cv_path)
+                if hasattr(self, 'qdrant_client') and self.qdrant_client:
+                    if not cv_text:
+                        print("Warning: CV text is empty. Cannot save to Qdrant.")
+                    else:
+                        try:
+                            # Generate embedding
+                            embedding = self.embedding_model.encode(cv_text).tolist()
+                            
+                            # Generate a unique ID for Qdrant
+                            cv_id = str(uuid.uuid4())
+                            
+                            # Save to Qdrant
+                            self.qdrant_client.upsert(
+                                collection_name="cv_embeddings",
+                                points=[
+                                    models.PointStruct(
+                                        id=cv_id,
+                                        vector=embedding,
+                                        payload={
+                                            "mongodb_id": "",  # Will be updated after MongoDB save
+                                            "filename": filename,
+                                            "text": cv_text
+                                        }
+                                    )
+                                ],
+                                wait=True
+                            )
+                            
+                            # Update CV document with Qdrant info
+                            cv_document['embedding_vector_id_qdrant'] = cv_id
+                            cv_document['embedding_model'] = 'all-mpnet-base-v2'
+                            cv_document['vectorized'] = True
+                            
+                            print(f"CV '{filename}' saved to Qdrant with id {cv_id}")
+                            
+                        except Exception as e:
+                            print(f"Failed to save CV to Qdrant: {e}")
+                            cv_document['status'] = 'error'
+                            cv_document['error'] = str(e)
+                else:
+                    print("Qdrant client not available. Cannot save vector data.")
+                    cv_document['status'] = 'error'
+                    cv_document['error'] = 'Qdrant client not available'
+                
+                # Save to MongoDB with all fields including Qdrant info
                 result = self.cv_uploads.insert_one(cv_document)
+                
+                # Update Qdrant with the MongoDB ID if the save was successful
+                if cv_document.get('vectorized', False) and hasattr(self, 'qdrant_client') and self.qdrant_client:
+                    try:
+                        self.qdrant_client.set_payload(
+                            collection_name="cv_embeddings",
+                            payload={"mongodb_id": str(result.inserted_id)},
+                            points=[cv_document['embedding_vector_id_qdrant']]
+                        )
+                    except Exception as e:
+                        print(f"Warning: Could not update Qdrant with MongoDB ID: {e}")
+
                 print("\n CV subido exitosamente a la base de datos.")
                 return True
                 
@@ -221,29 +307,7 @@ class JobSearchAgent:
         while True:
             next_question = self._get_next_question()
             
-            if next_question:
-                while True:
-                    user_input = input(f"\n{next_question['question']}\n> ").strip()
-                    
-                    if not user_input:
-                        print("Por favor, proporciona una respuesta.")
-                        continue
-                        
-                    validation_prompt = (
-                        f"El usuario respondió: '{user_input}' a la pregunta: '{next_question['question']}'. "
-                        "¿Es una respuesta válida? Si no es clara, pide aclaraciones de manera amable. "
-                        "Responde solo con 'VÁLIDO' si la respuesta es correcta, o con una explicación clara si necesita aclaración."
-                    )
-                    
-                    llm_response = self.llm.get_response(validation_prompt, self.user_profile)
-                    
-                    if llm_response.strip().upper() == "VÁLIDO":
-                        self.user_profile[next_question["key"]] = user_input
-                        self.save_profile()
-                        break
-                    else:
-                        print(f"\nAsistente: {llm_response}")
-            else:
+            if next_question is None:
                 # All questions answered, show summary
                 self._display_profile_summary()
                 
@@ -255,7 +319,55 @@ class JobSearchAgent:
                 print("Ahora nos pondremos manos a la obra con tu búsqueda de empleo.")
                 print("\n¡Gracias por usar el asistente de búsqueda de empleo de OffHeadHunter! ¡Buena suerte con tu búsqueda!")
                 break
+                
+            # Ask the current question
+            while True:
+                user_input = input(f"\n{next_question['question']}\n> ").strip()
+                
+                if not user_input:
+                    print("Por favor, proporciona una respuesta.")
+                    continue
+                    
+                # Special validation for work modality
+                if next_question["key"] == "work_modality":
+                    normalized_input = user_input.strip().capitalize()
+                    if normalized_input in ["Presencial", "Híbrido", "A distancia"]:
+                        llm_response = "VÁLIDO"
+                        # Save the normalized version (capitalized)
+                        user_input = normalized_input
+                    else:
+                        llm_response = "Por favor, elige una de las opciones: Presencial, Híbrido o A distancia"
+                # Special validation for location
+                elif next_question["key"] == "location":
+                    # Check if the input looks like a valid location (letters, spaces, hyphens, and some special characters for cities)
+                    if not user_input.replace(' ', '').replace('-', '').replace('.', '').replace("'", "").replace("´", "").isalpha():
+                        llm_response = "Por favor, ingresa un nombre de país o ciudad válido (solo letras, espacios y guiones)."
+                    else:
+                        validation_prompt = (
+                            f"¿Es '{user_input}' un nombre de país o ciudad válido? "
+                            "Responde solo con 'VÁLIDO' si es un país o ciudad real, o con una explicación si no lo es. "
+                            "No incluyas nada más en tu respuesta."
+                        )
+                        llm_response = self.llm.get_response(validation_prompt, self.user_profile)
+                else:
+                    # Standard validation for other questions
+                    validation_prompt = (
+                        f"El usuario respondió: '{user_input}' a la pregunta: '{next_question['question']}'. "
+                        "¿Es una respuesta válida? Si no es clara, pide aclaraciones de manera amable. "
+                        "Responde solo con 'VÁLIDO' si la respuesta es correcta, o con una explicación clara si necesita aclaración."
+                    )
+                    llm_response = self.llm.get_response(validation_prompt, self.user_profile)
+                
+                if llm_response.strip().upper() == "VÁLIDO":
+                    self.user_profile[next_question["key"]] = user_input
+                    self.save_profile()
+                    break
+                else:
+                    print(f"\nAsistente: {llm_response}")
 
 if __name__ == '__main__':
+    print("--- Script execution started ---", flush=True)
     agent = JobSearchAgent()
+    print("--- Agent initialized ---", flush=True)
     agent.run()
+    print("--- Script execution finished ---", flush=True)

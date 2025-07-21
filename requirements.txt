@@ -110,3 +110,6 @@ websocket-client==1.8.0
 websockets==15.0.1
 wrapt==1.17.2
 wsproto==1.2.0
+google-generativeai>=0.3.0,<1.0.0  # Añadido para soporte de embeddings de Google
+streamlit
+unstructured[pdf]
