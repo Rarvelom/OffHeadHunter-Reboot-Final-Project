@@ -104,7 +104,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
         
         # Guardar en Qdrant usando JobOfferStorage
         try:
-            job_storage = JobOfferStorage(collection_name="job_embeddings")
+            job_storage = JobOfferStorage(collection_name="job_embeddings_BGE")
             
             # Crear un diccionario solo con los campos necesarios para Qdrant
             qdrant_doc = {

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class JobOfferStorage:
     """Clase para manejar el almacenamiento de ofertas de trabajo en Qdrant."""
     
-    def __init__(self, collection_name: str = "job_embeddings"):
+    def __init__(self, collection_name: str = "job_embeddings_BGE"):
         """
         Inicializa el almacenamiento de ofertas.
         
@@ -94,7 +94,7 @@ class JobOfferStorage:
                 # Devolver solo la información del embedding
                 return {
                     "embedding_vector_id_qdrant": point_id,
-                    "embedding_model": "all-mpnet-base-v2"
+                    "embedding_model": "BAAI/bge-m3"
                 }
                 
             except Exception as e:

@@ -10,16 +10,17 @@ from sentence_transformers import SentenceTransformer
 from unstructured.partition.auto import partition
 
 class TextProcessor:
-    def __init__(self, model_name: str = 'all-mpnet-base-v2'):
+    def __init__(self, model_name: str = 'BAAI/bge-m3'):
         """
         Inicializa el procesador de texto con un modelo de embeddings.
         
         Args:
             model_name: Nombre del modelo de Sentence Transformers a utilizar.
-                       Por defecto usa 'all-mpnet-base-v2' que genera vectores de 768 dimensiones.
-                       Es un modelo de alta calidad que funciona bien para tareas de búsqueda semántica.
+                       Por defecto usa 'BAAI/bge-m3' que genera vectores de 1024 dimensiones.
+                       Es un modelo optimizado para búsqueda semántica y generación de embeddings.
         """
-        self.model = SentenceTransformer(model_name)
+        # Configurar para usar CPU
+        self.model = SentenceTransformer(model_name, device='cpu')
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
         
     def extract_text_from_file(self, file_path: Union[str, Path]) -> str:

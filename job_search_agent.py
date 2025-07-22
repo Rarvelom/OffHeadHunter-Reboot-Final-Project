@@ -88,7 +88,7 @@ class JobSearchAgent:
                     url=self.qdrant_url,
                     api_key=self.qdrant_api_key,
                 )
-            self.embedding_model = SentenceTransformer('all-mpnet-base-v2')
+            self.embedding_model = SentenceTransformer('BAAI/bge-m3')
 
             self.db = self.client["offheadhunter_db"]
             # Usando las colecciones especificadas
@@ -252,7 +252,7 @@ class JobSearchAgent:
                             
                             # Update CV document with Qdrant info
                             cv_document['embedding_vector_id_qdrant'] = cv_id
-                            cv_document['embedding_model'] = 'all-mpnet-base-v2'
+                            cv_document['embedding_model'] = 'BGE-m3'
                             cv_document['vectorized'] = True
                             
                             print(f"CV '{filename}' saved to Qdrant with id {cv_id}")

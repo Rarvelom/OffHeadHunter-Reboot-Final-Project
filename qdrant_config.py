@@ -35,15 +35,15 @@ def get_collection_configs():
     }
     """
     return {
-        "cv_embeddings": {
+        "cv_embeddings_BGE": {
             "vectors_config": models.VectorParams(
-                size=768,  # Dimensión para los embeddings (all-mpnet-base-v2 output)
+                size=1024,  # Dimensión para los embeddings (BAAI/bge-m3)
                 distance=models.Distance.COSINE
             )
         },
-        "job_embeddings": {
+        "job_embeddings_BGE": {
             "vectors_config": models.VectorParams(
-                size=768,  # Dimensión para los embeddings (all-mpnet-base-v2 output)
+                size=1024,  # Dimensión para los embeddings (BAAI/bge-m3)
                 distance=models.Distance.COSINE
             )
         }

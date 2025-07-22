@@ -187,17 +187,62 @@ class QdrantStorage:
         
         return results
     
-    def delete_document(self, document_id: str) -> int:
+    def save_document(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Elimina todos los chunks de un documento.
+        Guarda un documento completo en Qdrant.
         
         Args:
-            document_id: ID del documento a eliminar.
-            
+            document_data: Diccionario con los datos del documento que incluye:
+                - text: Texto del documento
+                - embedding: Embedding del documento
+                - metadata: Metadatos adicionales
+                - user_id: ID del usuario (opcional)
+                
         Returns:
-            Número de puntos eliminados.
+            Diccionario con el ID del punto almacenado y otros detalles.
         """
-        # Crear filtro para el document_id
+        try:
+            if "embedding" not in document_data:
+                raise ValueError("El documento debe contener un embedding")
+            
+            # Generar un ID único para el documento
+            point_id = str(uuid.uuid4())
+            
+            # Crear el payload con los datos del documento
+            payload = {
+                "text": document_data.get("text", ""),
+                "created_at": datetime.utcnow().isoformat(),
+                "metadata": document_data.get("metadata", {}),
+                "user_id": document_data.get("user_id")
+            }
+            
+            # Crear el punto para Qdrant
+            point = PointStruct(
+                id=point_id,
+                vector=document_data["embedding"],
+                payload=payload
+            )
+            
+            # Insertar en Qdrant
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[point],
+                wait=True
+            )
+            
+            logger.info(f"Documento guardado exitosamente con ID: {point_id}")
+            
+            return {
+                "point_id": point_id,
+                "status": "success",
+                "collection": self.collection_name
+            }
+            
+        except Exception as e:
+            logger.error(f"Error al guardar documento: {str(e)}")
+            raise
+            
+    def delete_document(self, document_id: str) -> int:
         filter_condition = Filter(
             must=[
                 FieldCondition(
