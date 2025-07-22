@@ -10,16 +10,23 @@ def main():
     agent.run(reset_profile=True)
     user_profile = agent.user_profile  # Diccionario con los datos
 
-    # Solo usamos job_title y work_modality por ahora
+    # Extraer los datos del perfil del usuario
     job_title = user_profile.get('job_title')
     work_modality = user_profile.get('work_modality')
+    salary_expectation = user_profile.get('salary_expectation')
+    location = user_profile.get('location')
 
     if not job_title:
         print("No se ha proporcionado un título de trabajo. Abortando.")
         sys.exit(1)
 
-    # Paso 2: Generar URL de búsqueda
-    url = generar_url_infojobs(job_title, work_modality)
+    # Paso 2: Generar URL de búsqueda con todos los parámetros
+    url = generar_url_infojobs(
+        puesto=job_title,
+        modalidad=work_modality,
+        salario_minimo=salary_expectation,
+        localidades=location
+    )
     print(f"URL generada para scraping: {url}")
 
     # Paso 3: Scraping de ofertas (guarda en MongoDB y devuelve la lista)
@@ -28,11 +35,8 @@ def main():
 
     # Paso 4: Exportar PDFs de las ofertas
     for offer in job_offers:
-        offer_url = offer.get("url")
-        external_id = offer.get("external_id", "oferta")
-        if offer_url:
-            filename = f"{external_id}.pdf"
-            export_ij_offer_to_pdf(offer_url, output_pdf=filename)
+        if offer.get("url"):
+            export_ij_offer_to_pdf(offer)
         else:
             print("Oferta sin URL, se omite PDF.")
 

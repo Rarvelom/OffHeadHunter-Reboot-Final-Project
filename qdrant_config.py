@@ -1,18 +1,18 @@
+import os
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from dotenv import load_dotenv
-import os
-
-# Load environment variables
-load_dotenv()
 
 def get_qdrant_client():
-    """Get Qdrant client instance with proper authentication"""
+    """
+    Crea y devuelve una instancia del cliente Qdrant
+    """
+    load_dotenv()
     qdrant_url = os.getenv('QDRANT_URL')
     qdrant_api_key = os.getenv('QDRANT_API_KEY')
 
     if not qdrant_url or not qdrant_api_key:
-        raise ValueError("Qdrant URL or API key not found in environment variables")
+        raise ValueError("No se encontró la URL o la API key de Qdrant en las variables de entorno")
 
     return QdrantClient(
         url=qdrant_url,
@@ -22,10 +22,9 @@ def get_qdrant_client():
 
 def get_collection_configs():
     """
-    Get collection configurations
+    Obtiene las configuraciones de las colecciones
 
-    Returns a dictionary with the following structure:
-
+    Retorna un diccionario con la siguiente estructura:
     {
         "cv_embeddings": {
             "vectors_config": models.VectorParams,
@@ -44,11 +43,7 @@ def get_collection_configs():
         },
         "job_embeddings": {
             "vectors_config": models.VectorParams(
-<<<<<<< HEAD
-                size=768,  # Actualizado para coincidir con all-mpnet-base-v2
-=======
                 size=768,  # Dimensión para los embeddings (all-mpnet-base-v2 output)
->>>>>>> 7d37cce (WIP: Changes before sync with remote)
                 distance=models.Distance.COSINE
             )
         }

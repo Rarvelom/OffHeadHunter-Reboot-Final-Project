@@ -131,7 +131,8 @@ def scrape_jobs(page_url):
         )
 
         results = []
-        for card in offer_cards:
+        # for card in offer_cards: # DESCOMENTAR PARA PRODUCCIÓN
+        for card in offer_cards[:2]:  # SOLO PARA PRUEBAS!!! procesa los primeros 5 elementos
             title_a = card.select_one('a.ij-OfferCardContent-description-title-link')
             offer_url = title_a['href'] if title_a and title_a.has_attr('href') else None
             if offer_url and offer_url.startswith('//'):

@@ -20,12 +20,12 @@ class PDFProcessor:
         """
         self.extract_metadata = extract_metadata
     
-    def process_pdf(self, file_path: Union[str, Path]) -> Dict[str, any]:
+    def process_pdf(self, file_path: Union[str, Path, bytes]) -> Dict[str, any]:
         """
         Process a PDF file and extract its text content and metadata.
         
         Args:
-            file_path: Path to the PDF file
+            file_path: Path to the PDF file or binary PDF data
             
         Returns:
             Dictionary containing:
@@ -33,12 +33,19 @@ class PDFProcessor:
                 - metadata: Extracted metadata (if extract_metadata is True)
                 - num_pages: Number of pages in the PDF
         """
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise FileNotFoundError(f"PDF file not found: {file_path}")
-        
         try:
-            with pymupdf.open(file_path) as doc:
+            # Handle binary data
+            if isinstance(file_path, bytes):
+                import io
+                doc = pymupdf.open(stream=io.BytesIO(file_path), filetype='pdf')
+            else:
+                # Handle file path
+                file_path = Path(file_path)
+                if not file_path.exists():
+                    raise FileNotFoundError(f"PDF file not found: {file_path}")
+                doc = pymupdf.open(file_path)
+            
+            with doc:
                 # Extract text from all pages
                 text = ""
                 for page in doc:
@@ -50,13 +57,13 @@ class PDFProcessor:
                     metadata = self._clean_metadata(doc.metadata)
                 
                 return {
-                    "text": text.strip(),
-                    "metadata": metadata,
-                    "num_pages": len(doc)
+                    'text': text.strip(),
+                    'metadata': metadata,
+                    'num_pages': len(doc)
                 }
                 
         except Exception as e:
-            logger.error(f"Error processing PDF {file_path}: {str(e)}")
+            logger.error(f"Error processing PDF: {e}")
             raise
     
     def _clean_metadata(self, metadata: Dict[str, any]) -> Dict[str, any]:
