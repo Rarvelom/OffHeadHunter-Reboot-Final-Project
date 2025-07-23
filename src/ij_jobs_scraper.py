@@ -116,7 +116,6 @@ def scrape_jobs(page_url):
                 EC.element_to_be_clickable((By.ID, "buttonKeyword"))
             )
             keyword_button.click()
-            import time
             time.sleep(3)
         except Exception as e:
             print(f"No se pudo hacer click en el botón 'buttonKeyword': {e}")

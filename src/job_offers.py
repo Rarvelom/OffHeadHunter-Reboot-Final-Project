@@ -60,20 +60,23 @@ class JobOfferStorage:
                 # Generar un nuevo UUID para Qdrant
                 point_id = str(uuid.uuid4())
                 
-                # Crear un payload más simple para Qdrant
-                payload = {
-                    "title": job_offer.get('title', ''),
-                    "company": job_offer.get('company', ''),
-                    "source_url": job_offer.get('url', ''),
-                    "has_pdf": bool(pdf_text)
-                }
+                # Preparar metadatos completos usando el método _prepare_metadata
+                has_pdf = bool(pdf_text)
+                payload = self._prepare_metadata(job_offer, has_pdf)
                 
-                # Si hay ubicaciones, añadirlas como texto plano
-                if 'locations' in job_offer and job_offer['locations']:
-                    if isinstance(job_offer['locations'], list):
-                        payload["locations"] = ', '.join(str(loc) for loc in job_offer['locations'] if loc)
-                    else:
-                        payload["locations"] = str(job_offer['locations'])
+                # Asegurarse de que los campos básicos estén presentes
+                if 'title' not in payload or not payload['title']:
+                    payload['title'] = job_offer.get('title', 'Sin título')
+                if 'company' not in payload or not payload['company']:
+                    payload['company'] = job_offer.get('company', 'Empresa no especificada')
+                if 'source_url' not in payload or not payload['source_url']:
+                    payload['source_url'] = job_offer.get('url', '')
+                if 'has_pdf' not in payload:
+                    payload['has_pdf'] = has_pdf
+                    
+                # Asegurar que la fecha de creación esté presente
+                if 'created_at' not in payload or not payload['created_at']:
+                    payload['created_at'] = datetime.utcnow().isoformat()
                 
                 logger.info(f"Insertando oferta en Qdrant con ID: {point_id}")
                 
