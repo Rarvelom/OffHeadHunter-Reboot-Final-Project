@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Union
 from dotenv import load_dotenv
@@ -11,21 +12,90 @@ from unstructured.partition.auto import partition
 from bson.binary import Binary
 import google.generativeai as genai
 
-SYSTEM_PROMPT = """Actúa como un asistente laboral inteligente para OffHeadHunter.
-Tu tarea es recopilar la información necesaria del usuario para iniciar automáticamente una búsqueda de empleo mediante scraping en portales laborales, basada en los criterios proporcionados.
+SYSTEM_PROMPT = """
+Actúa como un asistente laboral inteligente para OffHeadHunter.
 
-Guía al usuario paso a paso con tono profesional y amigable.
+Tu tarea es guiar al usuario para completar un perfil de búsqueda laboral y transformar sus respuestas en un formato útil para scraping automático.
 
-🟩 Flujo de preguntas:
-1. Cargo deseado
-2. Expectativa salarial
-3. Ubicación deseada
-4. Modalidad de trabajo
-5. Sube tu CV
+🔷 Para cada campo, debes asegurarte de lo siguiente:
 
-Sigue este flujo estrictamente y no pases a la siguiente pregunta hasta que la actual esté respondida adecuadamente.
+1. **job_title**: 
+   - Extrae una profesión clara en formato corto, útil como palabra clave. 
+   - Ejemplo: De "Me gustaría trabajar ayudando a personas con problemas sociales", responde: "Trabajador social".
 
-Solo cuando tengas todas las respuestas, muestra un resumen y despídete con el mensaje final."""
+2. **salary_expectation**:
+   - Extrae un número que represente el salario bruto anual en euros.
+   - Convierte si es mensual: "1500€ al mes" → 18000.
+
+3. **location**:
+   - Devuelve el/los código(s) numérico(s) correspondientes según esta tabla:
+            {
+                "A Coruña": 28,
+                "Álava/Araba": 2,
+                "Albacete": 3,
+                "Alicante/Alacant": 4,
+                "Almería": 5,
+                "Asturias": 6,
+                "Ávila": 7,
+                "Badajoz": 8,
+                "Barcelona": 9,
+                "Burgos": 10,
+                "Cáceres": 11,
+                "Cádiz": 12,
+                "Cantabria": 13,
+                "Castellón/Castelló": 14,
+                "Ceuta": 15,
+                "Ciudad Real": 16,
+                "Córdoba": 17,
+                "Cuenca": 18,
+                "Girona": 19,
+                "Granada": 21,
+                "Guadalajara": 22,
+                "Guipúzcoa/Gipuzkoa": 23,
+                "Huelva": 24,
+                "Huesca": 25,
+                "Islas Baleares/Illes Balears": 26,
+                "Jaén": 27,
+                "La Rioja": 29,
+                "Las Palmas": 20,
+                "León": 30,
+                "Lleida": 31,
+                "Lugo": 32,
+                "Madrid": 33,
+                "Málaga": 34,
+                "Melilla": 35,
+                "Murcia": 36,
+                "Navarra": 37,
+                "Ourense": 38,
+                "Palencia": 39,
+                "Pontevedra": 40,
+                "Salamanca": 41,
+                "Santa Cruz de Tenerife": 46,
+                "Segovia": 42,
+                "Sevilla": 43,
+                "Soria": 44,
+                "Tarragona": 45,
+                "Teruel": 47,
+                "Toledo": 48,
+                "Valencia/València": 49,
+                "Valladolid": 50,
+                "Vizcaya/Bizkaia": 51,
+                "Zamora": 52,
+                "Zaragoza": 53
+            }
+   - Si no está en España, responde que solo se permiten ubicaciones españolas. Si no se especifica ninguna ubicación concreta, responde que no le importa la localidad o que está abierto a cualquier ubicación, deja este campo vacío y continua con la siguiente pregunta.
+
+4. **work_modality**:
+   - Traduce a los códigos siguientes:
+     Presencial = 1, A distancia = 2, Híbrido = 3, Sin especificar = 4
+   - Puede devolver varios valores (ej. "2,3").
+   - Si la persona no especifica nada, dice que le es indiferente o que está abierto a cualquier modalidad, escoge todas las opciones (1, 2, 3, 4).
+
+Si consideras que necesitas mas información para responder, pide aclaraciones de manera amable.
+Siempre responde con la forma **transformada** y lista para ser almacenada, no repitas la entrada original del usuario.
+
+Una vez todo esté recogido, muestra un resumen de lo recopilado y despídete con cortesía profesional.
+"""
 
 class LLMService:
     def __init__(self, model: str = "gemini-2.5-flash"):
@@ -115,7 +185,7 @@ class JobSearchAgent:
             },
             {
                 "key": "salary_expectation",
-                "question": "¿Cuáles son tus expectativas salariales? (Indica el sueldo bruto anual y la moneda. Ejemplo: 30.000 EUR)",
+                "question": "¿Cuáles son tus expectativas salariales? (Indica el sueldo bruto anual que desearías para tu cargo indicado. Por ejemplo: 30.000)",
                 "description": "Expectativa salarial"
             },
             {
@@ -235,7 +305,7 @@ class JobSearchAgent:
                             
                             # Save to Qdrant
                             self.qdrant_client.upsert(
-                                collection_name="cv_embeddings",
+                                collection_name="cv_embeddings_BGE",
                                 points=[
                                     models.PointStruct(
                                         id=cv_id,
@@ -273,7 +343,7 @@ class JobSearchAgent:
                 if cv_document.get('vectorized', False) and hasattr(self, 'qdrant_client') and self.qdrant_client:
                     try:
                         self.qdrant_client.set_payload(
-                            collection_name="cv_embeddings",
+                            collection_name="cv_embeddings_BGE",
                             payload={"mongodb_id": str(result.inserted_id)},
                             points=[cv_document['embedding_vector_id_qdrant']]
                         )
@@ -297,73 +367,90 @@ class JobSearchAgent:
             print(f" {question['description']}: {value}")
         print("-"*40)
 
+    @staticmethod
+    def parse_llm_response(key: str, raw_response: str) -> str:
+        """
+        Extrae y limpia el valor de una respuesta generada por el modelo LLM.
+        
+        Args:
+            key (str): El nombre del campo esperado (ej: 'job_title').
+            raw_response (str): La respuesta devuelta por Gemini.
+        
+        Returns:
+            str: El valor limpio asociado a la clave esperada.
+        """
+        if not raw_response:
+            return ""
+
+        raw_response = raw_response.strip()
+
+        # Intenta extraer si viene como "**key**: valor"
+        match = re.search(rf"\*?\*?{re.escape(key)}\*?\*?\s*:\s*(.+)", raw_response, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        # Intenta extraer si viene como "key: valor" sin asteriscos
+        match = re.search(rf"{re.escape(key)}\s*:\s*(.+)", raw_response, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+
+        # Si no encuentra prefijo, y es una sola línea, asumimos que el contenido entero es el valor
+        if "\n" not in raw_response:
+            return raw_response.strip()
+
+        # Último recurso: buscar línea que parezca la que contiene el valor (con o sin key)
+        for line in raw_response.splitlines():
+            if key.lower() in line.lower():
+                parts = line.split(":")
+                if len(parts) > 1:
+                    return parts[1].strip()
+
+        # Si todo falla, devuelve tal cual
+        return raw_response.strip()
+
     def run(self, reset_profile: bool = True):
         self.load_profile(reset=reset_profile)
         
         print("¡Hola! Soy tu asistente de búsqueda de empleo OffHeadHunter.\n")
         print("Voy a ayudarte a completar tu perfil de búsqueda de empleo.\n")
         
-        # Ask profile questions
         while True:
             next_question = self._get_next_question()
             
             if next_question is None:
-                # All questions answered, show summary
                 self._display_profile_summary()
-                
-                # Ask for CV upload
+                # print(self.user_profile)
                 print("\n¡Perfecto! Ahora necesitamos que subas tu currículum vitae (CV).")
                 self._upload_cv()
-                
                 print("\n¡Gracias por completar tu perfil!")
                 print("Ahora nos pondremos manos a la obra con tu búsqueda de empleo.")
                 print("\n¡Gracias por usar el asistente de búsqueda de empleo de OffHeadHunter! ¡Buena suerte con tu búsqueda!")
                 break
-                
-            # Ask the current question
+            
             while True:
                 user_input = input(f"\n{next_question['question']}\n> ").strip()
                 
                 if not user_input:
                     print("Por favor, proporciona una respuesta.")
                     continue
-                    
-                # Special validation for work modality
-                if next_question["key"] == "work_modality":
-                    normalized_input = user_input.strip().capitalize()
-                    if normalized_input in ["Presencial", "Híbrido", "A distancia"]:
-                        llm_response = "VÁLIDO"
-                        # Save the normalized version (capitalized)
-                        user_input = normalized_input
-                    else:
-                        llm_response = "Por favor, elige una de las opciones: Presencial, Híbrido o A distancia"
-                # Special validation for location
-                elif next_question["key"] == "location":
-                    # Check if the input looks like a valid location (letters, spaces, hyphens, and some special characters for cities)
-                    if not user_input.replace(' ', '').replace('-', '').replace('.', '').replace("'", "").replace("´", "").isalpha():
-                        llm_response = "Por favor, ingresa un nombre de país o ciudad válido (solo letras, espacios y guiones)."
-                    else:
-                        validation_prompt = (
-                            f"¿Es '{user_input}' un nombre de país o ciudad válido? "
-                            "Responde solo con 'VÁLIDO' si es un país o ciudad real, o con una explicación si no lo es. "
-                            "No incluyas nada más en tu respuesta."
-                        )
-                        llm_response = self.llm.get_response(validation_prompt, self.user_profile)
-                else:
-                    # Standard validation for other questions
-                    validation_prompt = (
-                        f"El usuario respondió: '{user_input}' a la pregunta: '{next_question['question']}'. "
-                        "¿Es una respuesta válida? Si no es clara, pide aclaraciones de manera amable. "
-                        "Responde solo con 'VÁLIDO' si la respuesta es correcta, o con una explicación clara si necesita aclaración."
-                    )
-                    llm_response = self.llm.get_response(validation_prompt, self.user_profile)
-                
-                if llm_response.strip().upper() == "VÁLIDO":
-                    self.user_profile[next_question["key"]] = user_input
+
+                question_text = next_question['question']
+                transformation_prompt = (
+                    f"Pregunta: {question_text}\n"
+                    f"Respuesta del usuario: {user_input}\n"
+                    f"Transforma esta respuesta según las reglas anteriores."
+                )
+
+                raw_response = str(self.llm.get_response(transformation_prompt, self.user_profile)).strip()
+                cleaned_response = self.parse_llm_response(next_question["key"], raw_response)
+
+                if cleaned_response and cleaned_response.lower() != "no válido":
+                    self.user_profile[next_question["key"]] = cleaned_response
                     self.save_profile()
                     break
                 else:
-                    print(f"\nAsistente: {llm_response}")
+                    print("\nAsistente: No pude entender esa respuesta. ¿Podrías reformularla?")
+
 
 if __name__ == '__main__':
     print("--- Script execution started ---", flush=True)

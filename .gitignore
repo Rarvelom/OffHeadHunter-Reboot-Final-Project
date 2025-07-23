@@ -6,3 +6,6 @@ src/prettify.py
 __pycache__
 job_search_agent.backup.py
 Update_job_embeddings.py
+/app_testing
+/app_testing/obsolete
+src/ij_jobs_scraper.py.backup
