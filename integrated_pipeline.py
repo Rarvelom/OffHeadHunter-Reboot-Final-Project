@@ -35,25 +35,32 @@ def get_user_cv_text(qdrant_client) -> dict:
         dict: Diccionario con el texto del CV y el ID de Qdrant, o None si hay un error
     """
     try:
-        # Conectar a MongoDB
-        mongo_client = MongoClient(os.getenv('MONGODB_URI'))
-        db = mongo_client.get_database()
-        cv_collection = db['cv_uploads']
+        # Obtener el último CV del usuario desde MongoDB
+        load_dotenv()
+        mongo_uri = os.getenv("MONGODB_URI")
+        if not mongo_uri:
+            print("Error: MONGODB_URI no está configurado en el archivo .env")
+            return None
+            
+        mongo_client = MongoClient(mongo_uri)
+        db = mongo_client["offheadhunter_db"]
+        cv_collection = db["cv_uploads"]
         
-        # Obtener el CV más reciente del usuario
+        # Buscar el CV más reciente del usuario
         latest_cv = cv_collection.find_one(
-            {},  # Sin filtro para obtener el más reciente
-            sort=[('uploaded_at', -1)]  # Ordenar por fecha descendente
+            {"user_id": {"$exists": True}},
+            sort=[("uploaded_at", -1)]
         )
         
         if not latest_cv:
-            print("No se encontró ningún CV en la base de datos.")
+            print("No se encontró ningún CV para el usuario.")
             return None
             
-        # Obtener el ID de Qdrant
+        # Obtener el ID de Qdrant del documento del CV
+        # Usamos 'embedding_vector_id_qdrant' que es el campo que se usa al guardar el CV
         qdrant_id = latest_cv.get('embedding_vector_id_qdrant')
         if not qdrant_id:
-            print("El CV no tiene un ID de Qdrant asociado.")
+            print("No se encontró el ID de Qdrant en el documento del CV. Campos disponibles:", latest_cv.keys())
             return None
             
         print(f"\n✅ CV encontrado en la base de datos con ID de Qdrant: {qdrant_id}")
@@ -70,10 +77,18 @@ def get_user_cv_text(qdrant_client) -> dict:
             print(f"No se encontró el CV con ID {qdrant_id} en Qdrant.")
             return None
             
-        # Devolver el texto del CV y el ID de Qdrant
+        # Get the uploaded_at timestamp from the CV document
+        uploaded_at = latest_cv.get('uploaded_at')
+        
+        # If it's a datetime object, convert to ISO format string
+        if hasattr(uploaded_at, 'isoformat'):
+            uploaded_at = uploaded_at.isoformat()
+            
+        # Return the CV text, Qdrant ID, and upload timestamp
         return {
             'text': result[0].payload.get('text', ''),
-            'qdrant_id': str(qdrant_id)
+            'qdrant_id': str(qdrant_id),
+            'uploaded_at': uploaded_at
         }
         
     except Exception as e:
@@ -142,9 +157,13 @@ def main():
         else:
             print("⚠️ No se pudo obtener el ID de Qdrant del CV")
         
-        # Buscar ofertas similares al CV
+        # Buscar ofertas similares al CV (solo las publicadas después de que se subió el CV)
         print("\nBuscando ofertas similares a tu perfil...")
-        result = find_similar_jobs(cv_text, top_k=5)
+        result = find_similar_jobs(
+            cv_text, 
+            top_k=5,
+            cv_uploaded_at=cv_data.get('uploaded_at')
+        )
         
         # Mostrar advertencias si las hay
         if result.get('warnings'):

@@ -8,6 +8,7 @@ from qdrant_client.http import models
 from src.qdrant_storage import QdrantStorage
 from src.text_processing import TextProcessor
 from src.pdf_processor import PDFProcessor
+from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -74,9 +75,24 @@ class JobOfferStorage:
                 if 'has_pdf' not in payload:
                     payload['has_pdf'] = has_pdf
                     
-                # Asegurar que la fecha de creación esté presente
+                # Asegurar que los campos de timestamp estén presentes y en el formato correcto
+                current_time = get_current_utc_timestamp()
+                
+                # Establecer created_at si no existe
                 if 'created_at' not in payload or not payload['created_at']:
-                    payload['created_at'] = datetime.utcnow().isoformat()
+                    payload['created_at'] = current_time
+                else:
+                    # Convertir a formato unix si es necesario
+                    payload['created_at'] = to_unix_timestamp(payload['created_at'])
+                
+                # Asegurar que scraped_at esté en formato unix
+                if 'scraped_at' in payload and payload['scraped_at']:
+                    payload['scraped_at'] = to_unix_timestamp(payload['scraped_at'])
+                else:
+                    payload['scraped_at'] = current_time
+                    
+                # Añadir campo de actualización
+                payload['updated_at'] = current_time
                 
                 logger.info(f"Insertando oferta en Qdrant con ID: {point_id}")
                 
@@ -140,6 +156,11 @@ class JobOfferStorage:
                         "period": salary.get('period', 'year')
                     }
 
+            # Obtener la fecha actual
+            now = datetime.utcnow()
+            now_iso = now.isoformat()
+            now_timestamp = int(now.timestamp())  # Timestamp en segundos
+            
             # Construir metadatos
             metadata = {
                 "title": str(job_offer.get('title', '')),
@@ -147,7 +168,8 @@ class JobOfferStorage:
                 "url": str(job_offer.get('url', '')),
                 "source": "infojobs",
                 "mongodb_id": str(job_offer.get('_id', '')),
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": now_iso,
+                "scraped_at": now_timestamp,  # Añadido para filtrado por timestamp
                 "has_pdf": has_pdf,
                 "description": str(job_offer.get('description', ''))[:1000],
                 "locations": locations,

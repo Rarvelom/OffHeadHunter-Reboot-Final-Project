@@ -37,11 +37,7 @@ class BGE_M3_Embedder:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
             logger.info(f"Using device: {self.device}")
             
-            self.model = SentenceTransformer(
-                model_name,
-                device=self.device,
-                trust_remote_code=True
-            )
+            self.model = SentenceTransformer(model_name, device='cpu', trust_remote_code=True)
             self.model.max_seq_length = 512  # Optimize for most use cases
             self.dimension = BGE_M3_DIMENSION
             logger.info(f"BGE-M3 model loaded successfully")

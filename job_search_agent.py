@@ -91,9 +91,9 @@ Tu tarea es guiar al usuario para completar un perfil de búsqueda laboral y tra
    - Traduce a los códigos siguientes:
      Presencial = 1, A distancia = 2, Híbrido = 3, Sin especificar = 4
    - Puede devolver varios valores (ej. "2,3").
-   - Si la persona no especifica nada, dice que le es indiferente o que está abierto a cualquier modalidad, escoge todas las opciones (1, 2, 3, 4).
+   - Si la persona no especifica nada o dice que le es indiferente  o que está abierto a cualquier modalidad, escoge todas las opciones (1, 2, 3, 4).
 
-Si consideras que necesitas mas información para responder, pide aclaraciones de manera amable.
+Si consideras que necesitas mas información para cada campo, pide aclaraciones de manera amable, y no avances a la siguiente pregunta hasta que no hayas obtenido la información necesaria para completar el campo correctamente. En ese caso, quédate con la última respuesta dada
 Siempre responde con la forma **transformada** y lista para ser almacenada, no repitas la entrada original del usuario.
 
 Una vez todo esté recogido, muestra un resumen de lo recopilado y despídete con cortesía profesional.
@@ -160,7 +160,7 @@ class JobSearchAgent:
                     url=self.qdrant_url,
                     api_key=self.qdrant_api_key,
                 )
-            self.embedding_model = SentenceTransformer('BAAI/bge-m3')
+            self.embedding_model = SentenceTransformer('BAAI/bge-m3', device='cpu')
 
             self.db = self.client["offheadhunter_db"]
             # Usando las colecciones especificadas
@@ -197,7 +197,7 @@ class JobSearchAgent:
             },
             {
                 "key": "work_modality",
-                "question": "¿En qué modalidad prefieres trabajar? (Presencial, Híbrido, A distancia)",
+                "question": "¿En qué modalidad prefieres trabajar? (Presencial, Híbrido, A distancia, Indiferente)",
                 "description": "Modalidad de trabajo"
             }
         ]
@@ -316,7 +316,8 @@ class JobSearchAgent:
                                         payload={
                                             "mongodb_id": "",  # Will be updated after MongoDB save
                                             "filename": filename,
-                                            "text": cv_text
+                                            "text": cv_text,
+                                            "uploaded_at": datetime.utcnow().isoformat()
                                         }
                                     )
                                 ],
@@ -385,31 +386,32 @@ class JobSearchAgent:
         if not raw_response:
             return ""
 
-        raw_response = raw_response.strip()
-
-        # Intenta extraer si viene como "**key**: valor"
-        match = re.search(rf"\*?\*?{re.escape(key)}\*?\*?\s*:\s*(.+)", raw_response, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-
-        # Intenta extraer si viene como "key: valor" sin asteriscos
-        match = re.search(rf"{re.escape(key)}\s*:\s*(.+)", raw_response, re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-
-        # Si no encuentra prefijo, y es una sola línea, asumimos que el contenido entero es el valor
-        if "\n" not in raw_response:
-            return raw_response.strip()
-
-        # Último recurso: buscar línea que parezca la que contiene el valor (con o sin key)
-        for line in raw_response.splitlines():
-            if key.lower() in line.lower():
-                parts = line.split(":")
-                if len(parts) > 1:
-                    return parts[1].strip()
-
-        # Si todo falla, devuelve tal cual
-        return raw_response.strip()
+        # Si la respuesta es muy larga, tomar solo la primera línea
+        first_line = raw_response.strip().split('\n')[0].strip()
+        
+        # Eliminar cualquier texto después de un punto, signo de interrogación o exclamación
+        # que pueda ser parte de una conversación
+        for punct in ['.', '?', '!']:
+            if punct in first_line:
+                first_line = first_line.split(punct)[0].strip()
+        
+        # Eliminar comillas y otros caracteres especiales
+        first_line = re.sub(r'["\']', '', first_line)
+        
+        # Eliminar cualquier prefijo común de conversación
+        first_line = re.sub(r'^(?:\*\*)?(?:[A-Za-záéíóúÁÉÍÓÚñÑ\s]+\s*:\s*)?(?:\*\*)?', '', first_line)
+        first_line = re.sub(r'^[\s\-\*]+', '', first_line)
+        
+        # Si después de la limpieza no queda nada, usar la respuesta original
+        if not first_line.strip():
+            first_line = raw_response.strip()
+        
+        # Limitar la longitud para evitar respuestas demasiado largas
+        max_length = 100  # Longitud máxima razonable para un campo
+        if len(first_line) > max_length:
+            first_line = first_line[:max_length].rsplit(' ', 1)[0] + '...'
+            
+        return first_line.strip()
 
     def run(self, reset_profile: bool = True):
         self.load_profile(reset=reset_profile)
@@ -446,13 +448,44 @@ class JobSearchAgent:
 
                 raw_response = str(self.llm.get_response(transformation_prompt, self.user_profile)).strip()
                 cleaned_response = self.parse_llm_response(next_question["key"], raw_response)
-
-                if cleaned_response and cleaned_response.lower() != "no válido":
-                    self.user_profile[next_question["key"]] = cleaned_response
-                    self.save_profile()
-                    break
-                else:
-                    print("\nAsistente: No pude entender esa respuesta. ¿Podrías reformularla?")
+                
+                # Validación adicional según el tipo de campo
+                if next_question["key"] == "job_title":
+                    # Asegurar que el título del trabajo no esté vacío
+                    if not cleaned_response or len(cleaned_response) < 2:
+                        print("Por favor, proporciona un título de trabajo válido.")
+                        continue
+                    # Eliminar cualquier número o carácter especial al principio
+                    cleaned_response = re.sub(r'^[\d\s\-\*]+', '', cleaned_response).strip()
+                
+                elif next_question["key"] == "salary_expectation":
+                    # Extraer solo los números de la respuesta
+                    numbers = re.findall(r'\d+', cleaned_response)
+                    if numbers:
+                        cleaned_response = numbers[0]  # Tomar el primer número encontrado
+                    else:
+                        print("Por favor, proporciona un valor numérico para el salario.")
+                        continue
+                
+                elif next_question["key"] == "work_modality":
+                    # Normalizar la modalidad de trabajo
+                    modalidad = cleaned_response.lower()
+                    if any(m in modalidad for m in ["presencial", "oficina"]):
+                        cleaned_response = "Presencial"
+                    elif any(m in modalidad for m in ["híbrido", "hibrido"]):
+                        cleaned_response = "Híbrido"
+                    elif any(m in modalidad for m in ["remoto", "distancia", "teletrabajo"]):
+                        cleaned_response = "A distancia"
+                    else:
+                        print("Opción no reconocida. Usando 'Indiferente' como valor por defecto.")
+                        cleaned_response = "Indiferente"
+                
+                # Guardar la respuesta limpia
+                self.user_profile[next_question["key"]] = cleaned_response
+                self.save_profile()
+                break
+            else:
+                print("\nAsistente: No pude entender esa respuesta. ¿Podrías reformularla?")
 
 
 if __name__ == '__main__':

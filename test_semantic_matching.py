@@ -3,7 +3,8 @@ import sys
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp, is_after
 import yake
 from collections import Counter
 from nltk.corpus import stopwords
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize models
-model = SentenceTransformer('BAAI/bge-m3')
+model = SentenceTransformer('BAAI/bge-m3', device='cpu')
 
 # Initialize YAKE! keyword extractor
 yake_extractor = yake.KeywordExtractor(
@@ -146,15 +147,21 @@ def get_cv_embedding(text: str) -> List[float]:
         logger.error(f"Error getting CV embedding: {str(e)}")
         return None
 
-def find_similar_jobs(cv_text: str, top_k: int = 5, include_keywords: bool = True, is_current_search: bool = True) -> Dict[str, Any]:
+def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = True, 
+                     is_current_search: bool = True, hours_window: int = 24,
+                     cv_uploaded_at: str = None) -> Dict[str, Any]:
     """
-    Encuentra trabajos similares a un CV usando coincidencia semántica y análisis de palabras clave.
+    Encuentra trabajos similares a un CV usando coincidencia semántica y análisis de palabras clave,
+    considerando solo ofertas recientes.
     
     Args:
         cv_text: Texto del CV para buscar coincidencias
-        top_k: Número máximo de coincidencias a devolver
+        top_k: Número máximo de coincidencias a devolver (None para no limitar)
         include_keywords: Si se debe incluir análisis de palabras clave
         is_current_search: Si los resultados son de la búsqueda actual o históricos
+        hours_window: Ventana de tiempo en horas para considerar ofertas recientes (últimas X horas)
+        cv_uploaded_at: Fecha de carga del CV en formato ISO. Si se proporciona, solo se devolverán
+                       ofertas con scraped_at posterior a esta fecha.
         
     Returns:
         Dict con:
@@ -167,7 +174,7 @@ def find_similar_jobs(cv_text: str, top_k: int = 5, include_keywords: bool = Tru
         'matches': [],
         'source': 'current_search' if is_current_search else 'historical_data',
         'warnings': [],
-        'timestamp': datetime.utcnow().isoformat()
+        'timestamp': to_iso_format(datetime.now(timezone.utc))
     }
     
     if not cv_text:
@@ -213,15 +220,127 @@ def find_similar_jobs(cv_text: str, top_k: int = 5, include_keywords: bool = Tru
         result['warnings'].append(error_msg)
         return result
     
-    # Buscar ofertas similares usando coincidencia semántica
+    # Calcular la fecha límite para ofertas recientes
+    
+    # Si se proporcionó una fecha de carga del CV, usarla como límite inferior
+    # De lo contrario, usar la ventana de tiempo configurada
+    if cv_uploaded_at:
+        # Convertir a timestamp Unix usando la función utilitaria
+        time_threshold = to_unix_timestamp(cv_uploaded_at)
+        if time_threshold is None:
+            logger.warning(f"Formato de fecha de carga del CV inválido: {cv_uploaded_at}. Usando ventana de tiempo.")
+            time_threshold = get_current_utc_timestamp() - (hours_window * 3600)  # horas a segundos
+        else:
+            logger.info(f"Filtrando ofertas posteriores a la carga del CV (timestamp: {time_threshold})")
+    else:
+        # Usar ventana de tiempo si no se proporcionó fecha de carga
+        time_threshold = get_current_utc_timestamp() - (hours_window * 3600)  # horas a segundos
+    
+    # Buscar ofertas similares usando coincidencia semántica, filtrando por fecha
     try:
+        # Primero obtenemos los IDs de las ofertas recientes
+        from qdrant_client.models import Filter, FieldCondition, Range
+        
+        # Convertir la fecha a timestamp Unix (segundos desde epoch)
+        timestamp_threshold = int(time_threshold.timestamp())
+        
+        # Obtener la fecha actual para referencia
+        current_time = datetime.now(timezone.utc)
+        
+        logger.info(f"[DEBUG] Filtro de fechas - Hora actual: {current_time.isoformat()}")
+        logger.info(f"[DEBUG] Filtro de fechas - Umbral de búsqueda: {time_threshold.isoformat()}")
+        logger.info(f"[DEBUG] Filtro de fechas - Timestamp Unix del umbral: {timestamp_threshold}")
+        
+        # Primero, verificar algunas ofertas para ver sus timestamps
+        sample_jobs = client.scroll(
+            collection_name="job_embeddings_BGE",
+            limit=5,  # Revisar solo 5 ofertas para ver sus fechas
+            with_vectors=False,
+            with_payload=["scraped_at", "title", "company"]
+        )
+        
+        if sample_jobs and sample_jobs[0]:
+            logger.info("[DEBUG] Muestra de ofertas con sus fechas:")
+            for i, job in enumerate(sample_jobs[0][:5]):  # Mostrar hasta 5 ofertas
+                job_scraped_at = job.payload.get('scraped_at', 'No disponible')
+                job_title = job.payload.get('title', 'Sin título')
+                logger.info(f"  - Oferta {i+1}: \"{job_title}\" - scraped_at: {job_scraped_at}")
+        
+        # Crear filtro para ofertas recientes (scraped_at > time_threshold)
+        # Nota: time_threshold ya está en formato Unix timestamp (segundos desde epoch)
+        time_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="scraped_at",
+                    range=Range(
+                        gt=time_threshold  # Ya está en formato Unix timestamp
+                    )
+                )
+            ]
+        )
+        
+        logger.info(f"[DEBUG] Buscando ofertas con scraped_at > {timestamp_threshold} (unix timestamp)")
+        
+        # Buscar ofertas recientes con el filtro de tiempo
+        recent_jobs = client.scroll(
+            collection_name="job_embeddings_BGE",
+            scroll_filter=time_filter,
+            limit=1000,  # Límite razonable de ofertas recientes
+            with_vectors=False,
+            with_payload=["scraped_at", "title", "company"]  # Solo necesitamos estos campos inicialmente
+        )
+        
+        recent_job_ids = [job.id for job in recent_jobs[0]]
+        
+        if not recent_job_ids:
+            if cv_uploaded_at:
+                warning_msg = f"No se encontraron ofertas publicadas después de la carga del CV ({time_threshold.strftime('%Y-%m-%d %H:%M:%S')} UTC)"
+                logger.warning(warning_msg)
+                
+                # Obtener la oferta más reciente para comparar fechas
+                all_jobs = client.scroll(
+                    collection_name="job_embeddings_BGE",
+                    limit=1,
+                    with_vectors=False,
+                    with_payload=["scraped_at", "title"],
+                    order_by="scraped_at:desc"
+                )
+                
+                if all_jobs and all_jobs[0]:
+                    latest_job = all_jobs[0][0]
+                    latest_scraped_at = latest_job.payload.get('scraped_at')
+                    latest_title = latest_job.payload.get('title', 'Sin título')
+                    
+                    if latest_scraped_at:
+                        # Convertir el timestamp a datetime para mostrarlo de forma legible
+                        latest_dt = datetime.fromtimestamp(latest_scraped_at, timezone.utc)
+                        logger.warning(f"[DEBUG] La oferta más reciente es '\"{latest_title}\"' con scraped_at: {latest_scraped_at} (UTC: {latest_dt.isoformat()})")
+                    else:
+                        logger.warning(f"[DEBUG] La oferta más reciente no tiene campo scraped_at: {latest_title}")
+            else:
+                warning_msg = f"No se encontraron ofertas en las últimas {hours_window} horas"
+                logger.warning(warning_msg)
+                
+            result['warnings'].append(warning_msg)
+            return result
+            
+        logger.info(f"Se encontraron {len(recent_job_ids)} ofertas en las últimas {hours_window} horas")
+        
+        # Ahora buscamos solo en las ofertas recientes
         search_result = client.search(
             collection_name="job_embeddings_BGE",
             query_vector=cv_embedding,
-            limit=top_k * 2,  # Obtener más resultados para filtrar por palabras clave
+            limit=len(recent_job_ids) if top_k is None else min(top_k * 2, len(recent_job_ids)),
             with_vectors=False,
             with_payload=True,
-            score_threshold=0.4  # Umbral para considerar coincidencias relevantes
+            score_threshold=0.4,  # Umbral para considerar coincidencias relevantes
+            query_filter={
+                "must": [
+                    {
+                        "has_id": recent_job_ids
+                    }
+                ]
+            }
         )
         
         if not search_result:
@@ -274,7 +393,24 @@ def find_similar_jobs(cv_text: str, top_k: int = 5, include_keywords: bool = Tru
             job_company = payload.get('company', 'Empresa no especificada')
             job_description = payload.get('description', '')
             
-            # Asegurarse de que los campos de metadatos existan
+            # Verificar si la oferta es reciente según el umbral de tiempo
+            # Usar la función utilitaria para comparar timestamps
+            job_scraped_at = job.payload.get('scraped_at')
+            
+            # Verificar si job_scraped_at es un timestamp válido
+            if job_scraped_at is None:
+                logger.warning(f"Oferta sin campo 'scraped_at', se excluirá de los resultados")
+                continue
+                
+            # Convertir a entero si es float (por si acaso)
+            job_scraped_at = int(job_scraped_at) if job_scraped_at is not None else 0
+            
+            # Usar la función is_after para comparar correctamente
+            if is_after(job_scraped_at, time_threshold):
+                # La oferta es reciente, incluirla en los resultados
+                pass
+                
+            # Obtener metadatos del payload o de metadata
             metadata = payload.get('metadata', {})
             if not isinstance(metadata, dict):
                 metadata = {}
@@ -358,14 +494,21 @@ def find_similar_jobs(cv_text: str, top_k: int = 5, include_keywords: bool = Tru
     
     # Ordenar resultados por puntuación combinada (o semántica si no hay análisis de palabras clave)
     sort_key = 'combined_score' if include_keywords and any('combined_score' in m for m in result['matches']) else 'semantic_score'
-    result['matches'] = sorted(
-        result['matches'],
-        key=lambda x: x.get(sort_key, 0),
-        reverse=True
-    )[:top_k]  # Limitar al número solicitado de resultados
-    
-    # Agregar metadatos adicionales
-    result['total_matches'] = len(result['matches'])
+    if result['matches']:
+        result['matches'].sort(key=lambda x: x['combined_score'] if 'combined_score' in x else x['semantic_score'], 
+                             reverse=True)
+        
+        # Limitar al número solicitado de resultados, si se especificó
+        if top_k is not None and len(result['matches']) > top_k:
+            result['matches'] = result['matches'][:top_k]
+            
+        # Añadir información sobre el filtrado por fecha
+        result['filters'] = {
+            'time_window_hours': hours_window,
+            'time_threshold': time_threshold.isoformat(),
+            'total_recent_jobs': len(recent_job_ids),
+            'matching_recent_jobs': len(result['matches'])
+        }
     result['search_metrics'] = {
         'cv_keywords_count': len(cv_keywords) if include_keywords else 0,
         'jobs_processed': processed_matches,

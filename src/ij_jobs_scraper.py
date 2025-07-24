@@ -6,6 +6,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
+from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp
 import random
 import time
 import re
@@ -37,16 +38,21 @@ def parse_posted_at(fecha_publicacion):
         fecha = fecha_publicacion.lower().replace('hace', '').strip()
         if 'm' in fecha:  # minutos
             mins = int(fecha.replace('m', '').strip())
-            return (now - timedelta(minutes=mins)).isoformat()
+            dt = now - timedelta(minutes=mins)
         elif 'h' in fecha:  # horas
             hours = int(fecha.replace('h', '').strip())
-            return (now - timedelta(hours=hours)).isoformat()
+            dt = now - timedelta(hours=hours)
         elif 'día' in fecha or 'días' in fecha:  # días
             days = int(re.findall(r'(\d+)', fecha)[0])
-            return (now - timedelta(days=days)).isoformat()
-    except Exception:
+            dt = now - timedelta(days=days)
+        else:
+            return None
+            
+        # Convertir a timestamp Unix (segundos desde epoch)
+        return int(dt.timestamp())
+    except Exception as e:
+        print(f"Error al parsear fecha '{fecha_publicacion}': {e}")
         return None
-    return None
 
 USER_AGENTS = [
     # Algunos user agents de ejemplo
@@ -139,7 +145,7 @@ def scrape_jobs(page_url):
 
         results = []
         # for card in offer_cards: # DESCOMENTAR PARA PRODUCCIÓN
-        for card in offer_cards[:2]:  # SOLO PARA PRUEBAS!!! procesa los primeros 5 elementos
+        for card in offer_cards:  # SOLO PARA PRUEBAS!!! procesa los primeros 5 elementos
             title_a = card.select_one('a.ij-OfferCardContent-description-title-link')
             offer_url = title_a['href'] if title_a and title_a.has_attr('href') else None
             if offer_url and offer_url.startswith('//'):
@@ -188,7 +194,7 @@ def scrape_jobs(page_url):
 
             tags = list(filter(None, [contract_type, workday_type, modality]))
             external_id = extract_external_id(offer_url) if offer_url else None
-            scraped_at = datetime.now(timezone.utc).isoformat()
+            scraped_at = get_current_utc_timestamp()
 
             mongo_job = {
                 "external_id": external_id,
@@ -198,7 +204,7 @@ def scrape_jobs(page_url):
                 "locations": locations,
                 "description": description,
                 "url": offer_url,
-                "posted_at": posted_at,
+                "posted_at": to_unix_timestamp(posted_at) if posted_at else None,
                 "scraped_at": scraped_at,
                 "tags": tags,
                 "salary_range": salary_range,
