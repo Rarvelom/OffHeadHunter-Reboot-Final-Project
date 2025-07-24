@@ -11,6 +11,7 @@ from datetime import datetime
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from src.job_offers import JobOfferStorage
+from bson.binary import Binary
 import logging
 
 # Cargar variables de entorno
@@ -23,6 +24,22 @@ db = client['offheadhunter_db']
 
 # Configuración de logging
 logger = logging.getLogger(__name__)
+
+def extract_requirements_text(driver, timeout=10):
+    """Extrae el texto de requisitos del primer <article> en la oferta de InfoJobs."""
+    try:
+        # Esperar a que aparezca el artículo dentro del contenedor principal
+        article_element = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((
+                By.CSS_SELECTOR,
+                "section.ij-OfferDetailPage-mainContent div > div.ij-Box.ij-OfferDetailPage-mainContent-container > article:nth-child(1)"
+            ))
+        )
+        return article_element.text.strip()
+    
+    except TimeoutException:
+        print("No se pudo encontrar el contenido principal de requisitos (article).")
+        return ""
 
 def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
     """
@@ -66,6 +83,8 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
         
         time.sleep(1)
         
+        requirements_text = extract_requirements_text(driver)
+
         # Generar PDF
         pdf = driver.execute_cdp_cmd("Page.printToPDF", {
             "printBackground": True,
@@ -74,7 +93,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
             "paperHeight": 11.69,
         })
         
-        # Obtener el binario del PDF
+        # 1er MÉTODO UTILIZADO ORIGINALMENTE:Obtener el binario del PDF usando base64
         pdf_binary = base64.b64decode(pdf['data'])
         
         # Construir documento para MongoDB
@@ -84,6 +103,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
             'title': job_offer.get('title', 'Sin título'),
             'company': job_offer.get('company', 'Empresa no especificada'),
             'locations': job_offer.get('locations', []),
+            'requirements_text': requirements_text,
             'description': job_offer.get('description', ''),
             'url': offer_url,
             'posted_at': job_offer.get('posted_at', datetime.utcnow()),
@@ -94,7 +114,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
                 'period': 'year'
             }),
             'is_active': True,
-            'pdf_file': pdf_binary,
+            'pdf_file': Binary(pdf_binary),         # 2º MÉTODO PARA TESTEO DEL LLM DE REESCRITURA: Utilizamos bson.Binary para obtener el binario del PDF
             'pdf_filename': output_pdf
         }
         
@@ -111,6 +131,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
                 '_id': str(result.inserted_id),
                 'title': job_offer.get('title', ''),
                 'company': job_offer.get('company', ''),
+                'requirements_text': requirements_text,
                 'description': job_offer.get('description', ''),
                 'url': job_offer.get('url', ''),
                 'locations': job_offer.get('locations', []),

@@ -57,6 +57,7 @@ USER_AGENTS = [
 
 SOURCE_ID = "64e5c2d6f0a5e7a4f3b1c2d3"  # O el que uses
 
+# !!!BORRAR MAS ADELANTE!!! FUNCIÓN CON LÓGICA DUPLICADA EN "ij_pdf_exporter.py", de momento se ha desactivado su inicialización en "def scrape_jobs()" para evitar generar entradas duplicadas.
 def save_to_mongodb(jobs_data):
     load_dotenv()
     mongodb_uri = os.getenv('MONGODB_URI')
@@ -206,7 +207,7 @@ def scrape_jobs(page_url):
             }
             results.append(mongo_job)
 
-        save_to_mongodb(results)
+        # save_to_mongodb(results)
         
         return results
 

@@ -9,3 +9,5 @@ Update_job_embeddings.py
 /app_testing
 /app_testing/obsolete
 src/ij_jobs_scraper.py.backup
+job_search_agent.py.backup2
+cv_rewriter_agent.py

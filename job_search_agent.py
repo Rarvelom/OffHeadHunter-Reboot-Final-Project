@@ -83,7 +83,9 @@ Tu tarea es guiar al usuario para completar un perfil de búsqueda laboral y tra
                 "Zamora": 52,
                 "Zaragoza": 53
             }
-   - Si no está en España, responde que solo se permiten ubicaciones españolas. Si no se especifica ninguna ubicación concreta, responde que no le importa la localidad o que está abierto a cualquier ubicación, deja este campo vacío y continua con la siguiente pregunta.
+   - Si no está en España, responde que solo se permiten ubicaciones españolas. 
+   - Si no se especifica ninguna ubicación concreta, responde que no le importa la localidad o que está abierto a cualquier ubicación, deja este campo vacío y continua con la siguiente pregunta.
+   - Si el usuario responde que quiere buscar en toda España, o solo España, deja este campo vacio y continua con la siguiente pregunta.
 
 4. **work_modality**:
    - Traduce a los códigos siguientes:
@@ -277,16 +279,17 @@ class JobSearchAgent:
                 cv_document = {
                     'user_id': self.user_id,
                     'filename': os.path.basename(cv_path),
-                    'file_url': f"file://{cv_path}",  # Store the file path as URL
+                    'file_url': f"file://{cv_path}",  # URL del archivo
                     'original_text': cv_text,
-                    'version': 1,  # Initial version
+                    'version': 1,  # Version inicial
                     'vectorized': False,  # Will be updated after Qdrant save
                     'uploaded_at': datetime.utcnow(),
                     'status': 'pending',
+                    'file_binary': Binary(file_data),  # Binario original del CV (PDF o DOCX)
                     'metadata': {
                         'file_size': len(file_data),
-                        'file_type': file_ext[1:],  # Remove the dot
-                        'pages': len(cv_text.split('\n'))  # Estimate pages
+                        'file_type': file_ext[1:],  # Tipo de archivo (PDF o DOCX), se extrae el punto de la extensión.
+                        'pages': len(cv_text.split('\n'))  # Paginas estimadas
                     }
                 }
                 
