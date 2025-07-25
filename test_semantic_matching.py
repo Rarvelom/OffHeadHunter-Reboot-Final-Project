@@ -1,9 +1,9 @@
 import os
 import sys
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime, timedelta, timezone
 from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp, is_after
 import yake
 from collections import Counter
@@ -25,8 +25,8 @@ src_path = project_root / 'src'
 sys.path.append(str(project_root))  # Add project root to path
 sys.path.append(str(src_path))      # Add src directory to path
 
-from qdrant_client import QdrantClient
-from qdrant_client.http import models
+from qdrant_client import QdrantClient, models
+from qdrant_client.http import models as http_models
 from pymongo import MongoClient
 from qdrant_config import get_qdrant_client
 from sentence_transformers import SentenceTransformer
@@ -170,11 +170,15 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
         - 'warnings': Lista de advertencias
         - 'timestamp': Fecha de la búsqueda
     """
+    # Usar datetime y timezone del módulo datetime directamente para evitar conflictos de ámbito
+    from datetime import datetime as dt, timezone as tz
+    current_time = dt.now(tz.utc)
+    
     result = {
         'matches': [],
         'source': 'current_search' if is_current_search else 'historical_data',
         'warnings': [],
-        'timestamp': to_iso_format(datetime.now(timezone.utc))
+        'timestamp': to_iso_format(current_time)
     }
     
     if not cv_text:
@@ -225,55 +229,117 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
     # Si se proporcionó una fecha de carga del CV, usarla como límite inferior
     # De lo contrario, usar la ventana de tiempo configurada
     if cv_uploaded_at:
+        logger.info(f"[DEBUG] Fecha de carga del CV recibida: {cv_uploaded_at} (tipo: {type(cv_uploaded_at)})")
+        
         # Convertir a timestamp Unix usando la función utilitaria
         time_threshold = to_unix_timestamp(cv_uploaded_at)
+        
         if time_threshold is None:
-            logger.warning(f"Formato de fecha de carga del CV inválido: {cv_uploaded_at}. Usando ventana de tiempo.")
+            logger.warning(f"[WARNING] Formato de fecha de carga del CV inválido: {cv_uploaded_at}. Usando ventana de tiempo.")
             time_threshold = get_current_utc_timestamp() - (hours_window * 3600)  # horas a segundos
         else:
-            logger.info(f"Filtrando ofertas posteriores a la carga del CV (timestamp: {time_threshold})")
+            # Asegurarnos de que es un entero (segundos desde epoch)
+            time_threshold = int(time_threshold)
+            
+            # Convertir a datetime para logging legible
+            from datetime import datetime
+            dt_utc = datetime.utcfromtimestamp(time_threshold)
+            
+            logger.info(f"[DEBUG] Timestamp de carga del CV (Unix): {time_threshold}")
+            logger.info(f"[DEBUG] Fecha/hora UTC de carga del CV: {dt_utc.isoformat()}")
+            logger.info(f"[INFO] Filtrando ofertas posteriores a la carga del CV (UTC): {dt_utc.isoformat()}")
     else:
         # Usar ventana de tiempo si no se proporcionó fecha de carga
-        time_threshold = get_current_utc_timestamp() - (hours_window * 3600)  # horas a segundos
+        current_time = get_current_utc_timestamp()
+        time_threshold = current_time - (hours_window * 3600)  # horas a segundos
+        
+        logger.info(f"[INFO] No se proporcionó fecha de carga del CV. Usando ventana de {hours_window}h desde ahora.")
+        logger.info(f"[DEBUG] Timestamp actual (Unix): {current_time}")
+        logger.info(f"[DEBUG] Timestamp umbral (Unix): {time_threshold} (hace {hours_window} horas)")
+        
+        # Convertir a datetime para logging legible
+        from datetime import datetime
+        dt_threshold = datetime.utcfromtimestamp(time_threshold)
+        dt_current = datetime.utcfromtimestamp(current_time)
+        
+        logger.info(f"[DEBUG] Fecha/hora umbral (UTC): {dt_threshold.isoformat()}")
+        logger.info(f"[DEBUG] Fecha/hora actual (UTC): {dt_current.isoformat()}")
     
     # Buscar ofertas similares usando coincidencia semántica, filtrando por fecha
     try:
         # Primero obtenemos los IDs de las ofertas recientes
         from qdrant_client.models import Filter, FieldCondition, Range
         
-        # Convertir la fecha a timestamp Unix (segundos desde epoch)
-        timestamp_threshold = int(time_threshold.timestamp())
+        # time_threshold ya debería ser un timestamp Unix (segundos desde epoch)
+        # Verificamos el tipo para asegurarnos
+        if hasattr(time_threshold, 'timestamp'):
+            timestamp_threshold = int(time_threshold.timestamp())
+        else:
+            # Si ya es un timestamp numérico, lo convertimos a entero
+            timestamp_threshold = int(time_threshold)
         
-        # Obtener la fecha actual para referencia
-        current_time = datetime.now(timezone.utc)
+        # Aplicar ajuste de 1 hora al timestamp de carga del CV
+        timestamp_threshold -= 1 * 3600  # Restar 1 hora en segundos
+        
+        # Obtener la fecha actual para referencia usando el alias local
+        from datetime import datetime as dt, timezone as tz
+        current_time = dt.now(tz.utc)
+        
+        # Convertir el timestamp a datetime solo para logging
+        threshold_dt = dt.fromtimestamp(timestamp_threshold, tz=tz.utc)
+        logger.info(f"[INFO] Aplicando ajuste de 1 hora al timestamp de carga del CV")
+        logger.info(f"[DEBUG] Timestamp original: {timestamp_threshold + 3600} (sin ajuste)")
+        logger.info(f"[DEBUG] Timestamp con ajuste: {timestamp_threshold} (ajuste de -1 hora)")
         
         logger.info(f"[DEBUG] Filtro de fechas - Hora actual: {current_time.isoformat()}")
-        logger.info(f"[DEBUG] Filtro de fechas - Umbral de búsqueda: {time_threshold.isoformat()}")
+        logger.info(f"[DEBUG] Filtro de fechas - Umbral de búsqueda: {threshold_dt.isoformat()}")
         logger.info(f"[DEBUG] Filtro de fechas - Timestamp Unix del umbral: {timestamp_threshold}")
+        logger.info(f"[DEBUG] Filtro de fechas - Diferencia con ahora: {(current_time - threshold_dt).total_seconds()/3600:.2f} horas")
         
         # Primero, verificar algunas ofertas para ver sus timestamps
         sample_jobs = client.scroll(
             collection_name="job_embeddings_BGE",
-            limit=5,  # Revisar solo 5 ofertas para ver sus fechas
+            limit=10,  # Revisar 10 ofertas para ver sus fechas
             with_vectors=False,
-            with_payload=["scraped_at", "title", "company"]
+            with_payload=["scraped_at", "title", "company"],
+            order_by=http_models.OrderBy(
+                key="scraped_at",
+                direction=http_models.Direction.DESC
+            )
         )
         
         if sample_jobs and sample_jobs[0]:
-            logger.info("[DEBUG] Muestra de ofertas con sus fechas:")
-            for i, job in enumerate(sample_jobs[0][:5]):  # Mostrar hasta 5 ofertas
-                job_scraped_at = job.payload.get('scraped_at', 'No disponible')
+            logger.info("\n[DEBUG] MUESTRA DE OFERTAS CON SUS FECHAS DE CARGA (scraped_at):")
+            logger.info("-" * 80)
+            for i, job in enumerate(sample_jobs[0]):
+                job_scraped_at = job.payload.get('scraped_at')
                 job_title = job.payload.get('title', 'Sin título')
-                logger.info(f"  - Oferta {i+1}: \"{job_title}\" - scraped_at: {job_scraped_at}")
+                company = job.payload.get('company', 'Sin empresa')
+                
+                # Formatear la fecha legible
+                if job_scraped_at:
+                    try:
+                        job_dt = datetime.fromtimestamp(job_scraped_at, tz=timezone.utc)
+                        formatted_time = job_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                        time_diff = (current_time - job_dt).total_seconds() / 3600  # Diferencia en horas
+                        
+                        logger.info(f"  - Oferta {i+1}: \"{job_title}\"")
+                        logger.info(f"    Empresa: {company}")
+                        logger.info(f"    Fecha carga: {formatted_time} (hace {time_diff:.2f} horas)")
+                        logger.info(f"    Timestamp Unix: {job_scraped_at}")
+                        logger.info("-" * 60)
+                    except Exception as e:
+                        logger.warning(f"  - Oferta {i+1}: Error al formatear fecha: {str(e)}")
+                else:
+                    logger.warning(f"  - Oferta {i+1}: Sin fecha de carga (scraped_at) disponible")
         
-        # Crear filtro para ofertas recientes (scraped_at > time_threshold)
-        # Nota: time_threshold ya está en formato Unix timestamp (segundos desde epoch)
+        # Crear filtro para ofertas recientes (scraped_at > timestamp_threshold)
         time_filter = Filter(
             must=[
                 FieldCondition(
                     key="scraped_at",
                     range=Range(
-                        gt=time_threshold  # Ya está en formato Unix timestamp
+                        gt=timestamp_threshold  # Usar el timestamp ya convertido
                     )
                 )
             ]
@@ -294,29 +360,37 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
         
         if not recent_job_ids:
             if cv_uploaded_at:
-                warning_msg = f"No se encontraron ofertas publicadas después de la carga del CV ({time_threshold.strftime('%Y-%m-%d %H:%M:%S')} UTC)"
+                # Convertir el timestamp a datetime para mostrarlo en un formato legible
+                from datetime import datetime as dt, timezone as tz
+                dt_obj = dt.fromtimestamp(time_threshold, tz.utc)
+                warning_msg = f"No se encontraron ofertas publicadas después de la carga del CV ({dt_obj.strftime('%Y-%m-%d %H:%M:%S')} UTC)"
                 logger.warning(warning_msg)
                 
-                # Obtener la oferta más reciente para comparar fechas
+                # Obtener todas las ofertas para analizar el rango de fechas
+                from qdrant_client import models
                 all_jobs = client.scroll(
                     collection_name="job_embeddings_BGE",
-                    limit=1,
+                    limit=100,  # Aumentamos el límite para obtener un buen conjunto de ofertas
                     with_vectors=False,
-                    with_payload=["scraped_at", "title"],
-                    order_by="scraped_at:desc"
+                    with_payload=["scraped_at", "title", "company"],
+                    order_by=models.OrderBy(
+                        key="scraped_at",
+                        direction=models.Direction.DESC
+                    )
                 )
                 
                 if all_jobs and all_jobs[0]:
-                    latest_job = all_jobs[0][0]
-                    latest_scraped_at = latest_job.payload.get('scraped_at')
-                    latest_title = latest_job.payload.get('title', 'Sin título')
-                    
-                    if latest_scraped_at:
-                        # Convertir el timestamp a datetime para mostrarlo de forma legible
-                        latest_dt = datetime.fromtimestamp(latest_scraped_at, timezone.utc)
-                        logger.warning(f"[DEBUG] La oferta más reciente es '\"{latest_title}\"' con scraped_at: {latest_scraped_at} (UTC: {latest_dt.isoformat()})")
-                    else:
-                        logger.warning(f"[DEBUG] La oferta más reciente no tiene campo scraped_at: {latest_title}")
+                    # Procesar todas las ofertas obtenidas
+                    logger.warning("[DEBUG] Muestra de ofertas disponibles (ordenadas por fecha descendente):")
+                    for i, job in enumerate(all_jobs[0][:5]):  # Mostrar las primeras 5 como ejemplo
+                        job_scraped_at = job.payload.get('scraped_at')
+                        job_title = job.payload.get('title', 'Sin título')
+                        company = job.payload.get('company', 'Sin empresa')
+                        if job_scraped_at:
+                            job_dt = datetime.fromtimestamp(job_scraped_at, timezone.utc)
+                            logger.warning(f"  - Oferta {i+1}: '{job_title}' en {company} - {job_dt.isoformat()}")
+                        else:
+                            logger.warning(f"  - Oferta {i+1}: '{job_title}' en {company} - Sin fecha de scraping")
             else:
                 warning_msg = f"No se encontraron ofertas en las últimas {hours_window} horas"
                 logger.warning(warning_msg)
@@ -327,6 +401,15 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
         logger.info(f"Se encontraron {len(recent_job_ids)} ofertas en las últimas {hours_window} horas")
         
         # Ahora buscamos solo en las ofertas recientes
+        from qdrant_client import models
+        
+        # Crear el filtro con la condición has_id en el formato correcto
+        search_filters = models.Filter(
+            must=[
+                models.HasIdCondition(has_id=recent_job_ids)
+            ]
+        )
+        
         search_result = client.search(
             collection_name="job_embeddings_BGE",
             query_vector=cv_embedding,
@@ -334,13 +417,7 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
             with_vectors=False,
             with_payload=True,
             score_threshold=0.4,  # Umbral para considerar coincidencias relevantes
-            query_filter={
-                "must": [
-                    {
-                        "has_id": recent_job_ids
-                    }
-                ]
-            }
+            query_filter=search_filters
         )
         
         if not search_result:
@@ -503,11 +580,16 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
             result['matches'] = result['matches'][:top_k]
             
         # Añadir información sobre el filtrado por fecha
+        # Convertir el timestamp Unix a datetime para mostrarlo en un formato legible
+        from datetime import datetime as dt
+        threshold_dt = dt.fromtimestamp(time_threshold, tz=timezone.utc)
+        
         result['filters'] = {
             'time_window_hours': hours_window,
-            'time_threshold': time_threshold.isoformat(),
-            'total_recent_jobs': len(recent_job_ids),
-            'matching_recent_jobs': len(result['matches'])
+            'time_threshold': threshold_dt.isoformat(),  # Ahora es un datetime válido
+            'time_threshold_unix': time_threshold,  # Mantener el timestamp original
+            'total_recent_jobs': len(recent_job_ids) if 'recent_job_ids' in locals() else 0,
+            'matching_recent_jobs': len(result.get('matches', []))
         }
     result['search_metrics'] = {
         'cv_keywords_count': len(cv_keywords) if include_keywords else 0,

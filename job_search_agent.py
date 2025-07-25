@@ -2,7 +2,8 @@ import os
 import json
 import uuid
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from src.utils.time_utils import get_current_utc_timestamp
 from typing import Dict, List, Optional, Any, Union
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -283,7 +284,7 @@ class JobSearchAgent:
                     'original_text': cv_text,
                     'version': 1,  # Version inicial
                     'vectorized': False,  # Will be updated after Qdrant save
-                    'uploaded_at': datetime.utcnow(),
+                    'uploaded_at': get_current_utc_timestamp(),  # Guardar el timestamp actual sin ajustes
                     'status': 'pending',
                     'file_binary': Binary(file_data),  # Binario original del CV (PDF o DOCX)
                     'metadata': {
@@ -317,7 +318,7 @@ class JobSearchAgent:
                                             "mongodb_id": "",  # Will be updated after MongoDB save
                                             "filename": filename,
                                             "text": cv_text,
-                                            "uploaded_at": datetime.utcnow().isoformat()
+                                            "uploaded_at": get_current_utc_timestamp()  # Guardar el timestamp actual sin ajustes
                                         }
                                     )
                                 ],
