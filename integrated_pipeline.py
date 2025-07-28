@@ -29,7 +29,6 @@ from job_resume_tailor import (
     generate_tailored_resume,
     save_text_as_pdf,
     get_all_chunks, # Reutilizamos esta función si es necesario
-    get_cv_text_by_id, 
     get_job_details_by_id
 )
 
@@ -305,7 +304,7 @@ def main():
 
             # --- PASO 8: RECALCULAR Y COMPARAR MATCHING SCORE ---
             print("\n--- PASO 8: COMPARANDO MEJORA DEL MATCHING ---")
-            job_full_text = get_job_details_by_id(job_id).get('full_text')
+            job_full_text = get_job_details_by_id(job_id)
 
             if job_full_text:
                 # Calcular la nueva puntuación con el CV adaptado

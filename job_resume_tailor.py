@@ -62,37 +62,40 @@ Please return ONLY the improved resume text, with no additional commentary or ex
         logger.error(f"Error generating tailored resume: {str(e)}")
         return original_resume
 
-def get_cv_text_by_id(cv_id: str) -> str:
-    """Fetches the full text of a CV from MongoDB using its Qdrant ID."""
+def get_job_details_by_id(job_id: str) -> str:
+    """
+    Fetches job details from MongoDB's job_offers collection using embedding_vector_id_qdrant.
+    
+    Args:
+        job_id: The Qdrant vector ID to search for in the embedding_vector_id_qdrant field
+        
+    Returns:
+        str: Combined text from requirements_text and description fields, or empty string if not found
+    """
     try:
-        client = MongoClient(MONGO_URI)
-        db = client.get_database("offheadhunter")
-        cv_collection = db.get_collection("cvs")
-        cv_data = cv_collection.find_one({"qdrant_id": cv_id})
-        client.close()
-        return cv_data.get('full_text', '') if cv_data else ''
+        # Connect to MongoDB
+        client = MongoClient(os.getenv("MONGO_URI"))
+        db = client.get_database("offheadhunter_db")
+        job_offers = db.get_collection("job_offers")
+        
+        # Find the job by embedding_vector_id_qdrant
+        job_data = job_offers.find_one({"embedding_vector_id_qdrant": job_id})
+        
+        if not job_data:
+            print(f"No se encontró ninguna oferta con embedding_vector_id_qdrant: {job_id}")
+            return ""
+            
+        # Extract and combine the required fields
+        requirements = job_data.get("requirements_text", "")  # Note: "tetx" appears to be a typo in the field name
+        description = job_data.get("description", "")
+        
+        # Combine the fields with a space in between
+        full_text = " ".join(filter(None, [requirements, description]))
+        return full_text
+        
     except Exception as e:
-        logger.error(f"Error fetching CV text from MongoDB: {e}")
+        print(f"Error al obtener detalles del trabajo: {e}")
         return ""
-
-def get_job_details_by_id(job_id: str) -> dict:
-    """Fetches job details from Qdrant using its job_id."""
-    try:
-        qdrant_client = get_qdrant_client()
-        # Use a scroll query to fetch a point by its ID
-        scroll_result = qdrant_client.scroll(
-            collection_name="job_embeddings_BGE",
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(key="job_id", match=models.MatchValue(value=job_id))]
-            ),
-            limit=1
-        )
-        if scroll_result and scroll_result[0]:
-            return scroll_result[0][0].payload
-        return {}
-    except Exception as e:
-        logger.error(f"Error fetching job details from Qdrant: {e}")
-        return {}
 
 def save_text_as_pdf(text: str, output_path: Path):
     """Saves a string of text to a PDF file."""
