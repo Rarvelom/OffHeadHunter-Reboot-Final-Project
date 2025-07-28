@@ -70,6 +70,38 @@ def create_scraped_at_index(client, collection_name="job_embeddings_BGE"):
         logger.error(f"Error al crear el índice: {str(e)}")
         return False
 
+def create_user_id_index(client, collection_name="job_embeddings_BGE"):
+    """Crear un índice para el campo user_id en la colección especificada."""
+    try:
+        # Verificar si la colección existe
+        collections = client.get_collections()
+        collection_names = [c.name for c in collections.collections]
+
+        if collection_name not in collection_names:
+            logger.error(f"La colección {collection_name} no existe en Qdrant")
+            return False
+
+        # Crear el índice para user_id como keyword
+        logger.info(f"Creando índice para el campo 'user_id' en la colección '{collection_name}'...")
+
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="user_id",
+            field_schema=models.PayloadSchemaType.KEYWORD,
+            wait=True
+        )
+
+        logger.info("Índice de user_id creado exitosamente")
+        return True
+
+    except Exception as e:
+        if "already exists" in str(e):
+            logger.info("El índice 'user_id' ya existe, no es necesario crearlo")
+            return True
+        logger.error(f"Error al crear el índice 'user_id': {str(e)}")
+        return False
+
+
 def main():
     """Función principal."""
     logger.info("Iniciando configuración de índices de Qdrant")
@@ -80,7 +112,10 @@ def main():
     # Crear índice para el campo scraped_at
     success = create_scraped_at_index(client)
     
-    if success:
+    # Crear índice para el campo user_id
+    user_keyword = create_user_id_index(client)
+    
+    if success and user_keyword:
         logger.info("Configuración de índices completada exitosamente")
         return 0
     else:

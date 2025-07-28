@@ -11,3 +11,6 @@ Update_job_embeddings.py
 src/ij_jobs_scraper.py.backup
 job_search_agent.py.backup2
 cv_rewriter_agent.py
+ricky_integrated_pipeline.py
+qdrant_config.py.backup
+/uploads/tailored_cvs

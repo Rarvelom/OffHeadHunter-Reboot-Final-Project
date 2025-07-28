@@ -66,6 +66,8 @@ class JobOfferStorage:
                 payload = self._prepare_metadata(job_offer, has_pdf)
                 
                 # Asegurarse de que los campos básicos estén presentes
+                if 'user_id' not in payload or not payload['user_id']:
+                    payload['user_id'] = job_offer.get('user_id')
                 if 'title' not in payload or not payload['title']:
                     payload['title'] = job_offer.get('title', 'Sin título')
                 if 'company' not in payload or not payload['company']:
@@ -173,6 +175,7 @@ class JobOfferStorage:
                 "has_pdf": has_pdf,
                 "description": str(job_offer.get('description', ''))[:1000],
                 "locations": locations,
+                "user_id": job_offer.get('user_id', ''),
             }
 
             if salary_info:

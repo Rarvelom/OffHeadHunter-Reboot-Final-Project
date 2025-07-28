@@ -11,6 +11,7 @@ from datetime import datetime
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from src.job_offers import JobOfferStorage
+from src.utils.time_utils import get_current_utc_timestamp
 from bson.binary import Binary
 import logging
 
@@ -41,7 +42,7 @@ def extract_requirements_text(driver, timeout=10):
         print("No se pudo encontrar el contenido principal de requisitos (article).")
         return ""
 
-def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
+def export_ij_offer_to_pdf(job_offer, user_profile):
     """
     Descarga la página de una oferta de InfoJobs como PDF y la guarda en MongoDB.
     
@@ -96,10 +97,13 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
         # 1er MÉTODO UTILIZADO ORIGINALMENTE:Obtener el binario del PDF usando base64
         pdf_binary = base64.b64decode(pdf['data'])
         
+        current_time = get_current_utc_timestamp()
+
         # Construir documento para MongoDB
         job_document = {
             'external_id': job_offer.get('external_id'),
             'source_id': job_offer.get('source_id'),
+            'user_id': user_profile.get('user_id'),
             'title': job_offer.get('title', 'Sin título'),
             'company': job_offer.get('company', 'Empresa no especificada'),
             'locations': job_offer.get('locations', []),
@@ -107,7 +111,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
             'description': job_offer.get('description', ''),
             'url': offer_url,
             'posted_at': job_offer.get('posted_at', datetime.utcnow()),
-            'scraped_at': datetime.utcnow(),
+            'scraped_at': current_time,
             'tags': job_offer.get('tags', []),
             'salary_range': job_offer.get('salary_range', {
                 'currency': 'EUR',
@@ -115,9 +119,16 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
             }),
             'is_active': True,
             'pdf_file': Binary(pdf_binary),         # 2º MÉTODO PARA TESTEO DEL LLM DE REESCRITURA: Utilizamos bson.Binary para obtener el binario del PDF
-            'pdf_filename': output_pdf
+            'pdf_filename': f"{job_offer.get('title', 'Sin título')}_{current_time}"
         }
         
+        print(job_document['title']) # BORRAR!!! SOLO PARA TESTEOS Y COMPROBAR QUÉ CAMPOS SE REGISTRAN INICIALMENTE
+        print(job_document['scraped_at']) # BORRAR!!! SOLO PARA TESTEOS Y COMPROBAR QUÉ CAMPOS SE REGISTRAN INICIALMENTE
+        print(job_document['pdf_filename']) # BORRAR!!! SOLO PARA TESTEOS Y COMPROBAR QUÉ CAMPOS SE REGISTRAN INICIALMENTE
+
+
+
+
         # Insertar en MongoDB
         result = db.job_offers.insert_one(job_document)
         print(f"Oferta guardada en MongoDB con ID: {result.inserted_id}")
@@ -129,6 +140,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
             # Crear un diccionario solo con los campos necesarios para Qdrant
             qdrant_doc = {
                 '_id': str(result.inserted_id),
+                'user_id': user_profile.get('user_id'),
                 'title': job_offer.get('title', ''),
                 'company': job_offer.get('company', ''),
                 'requirements_text': requirements_text,
@@ -140,6 +152,7 @@ def export_ij_offer_to_pdf(job_offer, output_pdf="oferta_infojobs.pdf"):
                     'period': 'year'
                 }),
                 'posted_at': job_offer.get('posted_at', datetime.utcnow().isoformat()),
+                'scraped_at': current_time,
                 'tags': job_offer.get('tags', []),
                 'pdf_file': job_document.get('pdf_file')  # Pasamos el binario del PDF
             }

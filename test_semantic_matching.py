@@ -27,9 +27,10 @@ sys.path.append(str(src_path))      # Add src directory to path
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.http import models as http_models
+from qdrant_client.models import MatchValue
 from pymongo import MongoClient
 from qdrant_config import get_qdrant_client
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, util
 from dotenv import load_dotenv
 import logging
 import uuid
@@ -147,7 +148,7 @@ def get_cv_embedding(text: str) -> List[float]:
         logger.error(f"Error getting CV embedding: {str(e)}")
         return None
 
-def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = True, 
+def find_similar_jobs(cv_text: str, user_id: str, top_k: int = None, include_keywords: bool = True, 
                      is_current_search: bool = True, hours_window: int = 24,
                      cv_uploaded_at: str = None) -> Dict[str, Any]:
     """
@@ -174,6 +175,8 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
     from datetime import datetime as dt, timezone as tz
     current_time = dt.now(tz.utc)
     
+    user = user_id
+
     result = {
         'matches': [],
         'source': 'current_search' if is_current_search else 'historical_data',
@@ -327,6 +330,7 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
                         logger.info(f"    Empresa: {company}")
                         logger.info(f"    Fecha carga: {formatted_time} (hace {time_diff:.2f} horas)")
                         logger.info(f"    Timestamp Unix: {job_scraped_at}")
+                        logger.info(f"    ID de usuario: {user}")
                         logger.info("-" * 60)
                     except Exception as e:
                         logger.warning(f"  - Oferta {i+1}: Error al formatear fecha: {str(e)}")
@@ -341,10 +345,15 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
                     range=Range(
                         gt=timestamp_threshold  # Usar el timestamp ya convertido
                     )
+                ),
+                FieldCondition(
+                    key="user_id",
+                    match=MatchValue(value=user) # NUEVO! Filtrar por ID de usuario
                 )
             ]
         )
-        
+
+
         logger.info(f"[DEBUG] Buscando ofertas con scraped_at > {timestamp_threshold} (unix timestamp)")
         
         # Buscar ofertas recientes con el filtro de tiempo
@@ -353,7 +362,7 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
             scroll_filter=time_filter,
             limit=1000,  # Límite razonable de ofertas recientes
             with_vectors=False,
-            with_payload=["scraped_at", "title", "company"]  # Solo necesitamos estos campos inicialmente
+            with_payload=["scraped_at", "title", "company", "user_id"]  # Solo necesitamos estos campos inicialmente
         )
         
         recent_job_ids = [job.id for job in recent_jobs[0]]
@@ -361,7 +370,7 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
         if not recent_job_ids:
             if cv_uploaded_at:
                 # Convertir el timestamp a datetime para mostrarlo en un formato legible
-                from datetime import datetime as dt, timezone as tz
+                from datetime import datetime as dt
                 dt_obj = dt.fromtimestamp(time_threshold, tz.utc)
                 warning_msg = f"No se encontraron ofertas publicadas después de la carga del CV ({dt_obj.strftime('%Y-%m-%d %H:%M:%S')} UTC)"
                 logger.warning(warning_msg)
@@ -372,7 +381,7 @@ def find_similar_jobs(cv_text: str, top_k: int = None, include_keywords: bool = 
                     collection_name="job_embeddings_BGE",
                     limit=100,  # Aumentamos el límite para obtener un buen conjunto de ofertas
                     with_vectors=False,
-                    with_payload=["scraped_at", "title", "company"],
+                    with_payload=["scraped_at", "title", "company", "user_id"],
                     order_by=models.OrderBy(
                         key="scraped_at",
                         direction=models.Direction.DESC
@@ -721,6 +730,50 @@ def main():
     except Exception as e:
         logging.error(f"Error in main: {str(e)}")
         raise
+
+def calculate_scores(cv_text: str, job_text: str) -> Dict[str, float]:
+    """
+    Calculates semantic, keyword, and combined scores for a single CV-job pair.
+
+    Args:
+        cv_text: The full text of the CV.
+        job_text: The full text of the job description.
+
+    Returns:
+        A dictionary containing 'semantic_score', 'keyword_score', and 'combined_score'.
+    """
+    if not cv_text or not job_text:
+        return {'semantic_score': 0.0, 'keyword_score': 0.0, 'combined_score': 0.0}
+
+    # 1. Calculate Semantic Score (Cosine Similarity)
+    try:
+        cv_embedding = model.encode(cv_text, convert_to_tensor=True)
+        job_embedding = model.encode(job_text, convert_to_tensor=True)
+        semantic_score = util.cos_sim(cv_embedding, job_embedding).item()
+    except Exception as e:
+        logger.error(f"Error calculating semantic score: {e}")
+        semantic_score = 0.0
+
+    # 2. Calculate Keyword Score
+    try:
+        cv_keywords = extract_keywords(cv_text)
+        job_keywords = extract_keywords(job_text)
+        keyword_score, _ = get_keyword_overlap(cv_keywords, job_keywords)
+    except Exception as e:
+        logger.error(f"Error calculating keyword score: {e}")
+        keyword_score = 0.0
+
+    # 3. Calculate Combined Score (Weighted Average)
+    # NOTE: Using a 70/30 weighted average. This can be adjusted.
+    semantic_weight = 0.7
+    keyword_weight = 0.3
+    combined_score = (semantic_weight * semantic_score) + (keyword_weight * keyword_score)
+
+    return {
+        'semantic_score': semantic_score,
+        'keyword_score': keyword_score,
+        'combined_score': combined_score
+    }
 
 if __name__ == "__main__":
     main()
