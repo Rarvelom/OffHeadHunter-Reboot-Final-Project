@@ -1,596 +1,211 @@
 import os
-import json
-import torch
-import numpy as np
-from typing import List, Dict, Tuple, Optional
-from datetime import datetime
-from dotenv import load_dotenv
-import google.generativeai as genai
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qdrant_models
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
+import argparse
 import logging
+import numpy as np
+from dotenv import load_dotenv
+from qdrant_client import QdrantClient
+from typing import List, Dict
 
-# Load environment variables
+# Importar configuración y utilidades centralizadas
+from qdrant_config import get_qdrant_client, CV_COLLECTION, JOB_COLLECTION
+from src.qdrant_utils import get_all_chunks, get_all_job_chunks, group_chunks_by_doc, list_document_ids
+
+# --- CONFIG ---
 load_dotenv()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
-BGE_M3_MODEL_NAME = "BAAI/bge-m3"
-BGE_M3_DIMENSION = 1024
-
-class BGE_M3_Embedder:
-    """Handles text embeddings using BAAI/bge-m3 model with error handling and device management"""
+# --- HELPERS ---
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calculates cosine similarity between two vectors."""
+    vec1 = np.array(vec1)
+    vec2 = np.array(vec2)
+    dot_product = np.dot(vec1, vec2)
+    norm_product = np.linalg.norm(vec1) * np.linalg.norm(vec2)
+    return float(dot_product / (norm_product + 1e-8))
+# --- CORE LOGIC ---
+def match_cv_to_jobs(client: QdrantClient, cv_id: str, cv_collection: str, job_collection: str, specific_job_ids: List[str] = None) -> List[Dict[str, any]]:
+    """Matches a CV to all available job offers and returns a scored list."""
+    # Retrieve CV chunks
+    cv_chunks = get_all_chunks(client, cv_collection, cv_id)
+    if not cv_chunks:
+        logger.warning(f"No chunks found for CV {cv_id}. Cannot perform matching.")
+        return []
+    logger.info(f"Found {len(cv_chunks)} chunks for CV {cv_id}.")
     
-    def __init__(self, model_name: str = BGE_M3_MODEL_NAME):
-        """Initialize the BGE-M3 model with error handling and device selection"""
-        try:
-            logger.info(f"Loading BGE-M3 model: {model_name}")
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            logger.info(f"Using device: {self.device}")
-            
-            self.model = SentenceTransformer(model_name, device='cpu', trust_remote_code=True)
-            self.model.max_seq_length = 512  # Optimize for most use cases
-            self.dimension = BGE_M3_DIMENSION
-            logger.info(f"BGE-M3 model loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to load BGE-M3 model: {str(e)}")
-            raise
-        
-    def embed(self, texts: List[str], batch_size: int = 32) -> List[List[float]]:
-        """
-        Generate embeddings for a list of texts with error handling and batching
-        
-        Args:
-            texts: List of text strings to embed
-            batch_size: Number of texts to process in each batch
-            
-        Returns:
-            List of embedding vectors (one per input text)
-        """
-        if not texts:
+    # Debug - print first chunk to check format
+    if len(cv_chunks) > 0:
+        logger.info(f"Sample CV chunk: {cv_chunks[0].payload.get('text', '')[:100]}...")
+        logger.info(f"CV chunk vector type: {type(cv_chunks[0].vector)}, length: {len(cv_chunks[0].vector)}")
+
+    # Retrieve job chunks
+    all_job_chunks = get_all_job_chunks(client, job_collection)
+    if not all_job_chunks:
+        logger.warning(f"No job offers found in collection {job_collection}. Cannot perform matching.")
+        return []
+    logger.info(f"Found {len(all_job_chunks)} total job chunks to compare against.")
+    
+    # Debug - print first job chunk to check format
+    if len(all_job_chunks) > 0:
+        logger.info(f"Sample job chunk: {all_job_chunks[0].payload.get('text', '')[:100]}...")
+        logger.info(f"Job chunk vector type: {type(all_job_chunks[0].vector)}, length: {len(all_job_chunks[0].vector)}")
+
+    # Group job chunks by document ID
+    jobs_by_id = group_chunks_by_doc(all_job_chunks)
+    logger.info(f"Grouped job chunks into {len(jobs_by_id)} unique job offers.")
+    
+    # Filter by specific job IDs if provided
+    if specific_job_ids:
+        logger.info(f"Filtering to specific job IDs: {specific_job_ids}")
+        filtered_jobs_by_id = {job_id: chunks for job_id, chunks in jobs_by_id.items() 
+                              if job_id in specific_job_ids}
+        logger.info(f"After filtering: {len(filtered_jobs_by_id)} job offers to match against")
+        if not filtered_jobs_by_id:
+            logger.warning(f"None of the specified job IDs found in collection. Available IDs: {list(jobs_by_id.keys())[:10]}...")
             return []
-            
-        try:
-            # Process in batches to handle memory constraints
-            embeddings = []
-            for i in tqdm(range(0, len(texts), batch_size), 
-                         desc="Generating embeddings", 
-                         unit="batch"):
-                batch = texts[i:i + batch_size]
-                batch_embeddings = self.model.encode(
-                    batch, 
-                    batch_size=len(batch),
-                    normalize_embeddings=True,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                    convert_to_tensor=False
-                )
-                embeddings.extend(batch_embeddings.tolist())
-                
-            return embeddings
-            
-        except Exception as e:
-            logger.error(f"Error generating embeddings: {str(e)}")
-            # Return empty embeddings for failed batch to avoid breaking the pipeline
-            return [[]] * len(texts)
-
-class QdrantManager:
-    """Manages Qdrant vector database operations with project configuration"""
+        jobs_by_id = filtered_jobs_by_id
     
-    def __init__(self):
-        """Initialize Qdrant client with configuration from environment"""
-        self.qdrant_url = os.getenv('QDRANT_URL')
-        self.qdrant_api_key = os.getenv('QDRANT_API_KEY')
-        
-        if not self.qdrant_url or not self.qdrant_api_key:
-            logger.warning(
-                "QDRANT_URL or QDRANT_API_KEY not set in environment. "
-                "Using default localhost configuration"
-            )
-            self.qdrant_url = "http://localhost:6333"
-            self.qdrant_api_key = ""
-        
-        try:
-            self.client = QdrantClient(
-                url=self.qdrant_url,
-                api_key=self.qdrant_api_key if self.qdrant_api_key else None,
-                prefer_grpc=True,
-                timeout=30.0
-            )
-            logger.info(f"Connected to Qdrant at {self.qdrant_url}")
-        except Exception as e:
-            logger.error(f"Failed to connect to Qdrant at {self.qdrant_url}: {str(e)}")
-            raise
-        
-        # Collection configurations
-        self.collections = {
-            "job_embeddings_BGE": {
-                "name": "job_embeddings_BGE",
-                "vector_size": BGE_M3_DIMENSION,
-                "distance": qdrant_models.Distance.COSINE
-            },
-            "cv_embeddings_BGE": {
-                "name": "cv_embeddings_BGE",
-                "vector_size": BGE_M3_DIMENSION,
-                "distance": qdrant_models.Distance.COSINE
-            }
-        }
+    # IMPROVED SCORING ALGORITHM
+    job_scores = {}
+    job_match_details = {}
     
-    def ensure_collections_exist(self, vector_size: int = BGE_M3_DIMENSION) -> None:
-        """Ensure all required collections exist with proper configuration"""
-        try:
-            existing_collections = {
-                collection.name: collection 
-                for collection in self.client.get_collections().collections
+    for job_id, job_chunks_list in jobs_by_id.items():
+        logger.info(f"Processing job {job_id} with {len(job_chunks_list)} chunks")
+        
+        # 1. For each CV chunk, find best matching job chunk
+        cv_chunk_scores = []
+        top_matches = []
+        
+        for cv_idx, cv_chunk in enumerate(cv_chunks):
+            chunk_matches = []
+            
+            for job_idx, job_chunk in enumerate(job_chunks_list):
+                try:
+                    similarity = cosine_similarity(cv_chunk.vector, job_chunk.vector)
+                    chunk_matches.append({
+                        "job_chunk_idx": job_idx,
+                        "similarity": similarity,
+                        "cv_text": cv_chunk.payload.get("text", "")[:100],
+                        "job_text": job_chunk.payload.get("text", "")[:100]
+                    })
+                except Exception as e:
+                    logger.error(f"Error computing similarity: {e}")
+            
+            # Find best match for this CV chunk
+            if chunk_matches:
+                best_match = max(chunk_matches, key=lambda x: x["similarity"])
+                cv_chunk_scores.append(best_match["similarity"])
+                top_matches.append(best_match)
+            else:
+                cv_chunk_scores.append(0.0)
+        
+        # 2. Calculate weighted score - emphasize top matches more
+        if cv_chunk_scores:
+            # Sort scores in descending order
+            sorted_scores = sorted(cv_chunk_scores, reverse=True)
+            
+            # Calculate weighted average (higher weight for better matches)
+            weighted_total = 0
+            weight_sum = 0
+            
+            for i, score in enumerate(sorted_scores):
+                # Weight decreases as we go down the list
+                weight = 1.0 / (1 + i * 0.2)  # Weight formula: less reduction for top scores
+                weighted_total += score * weight
+                weight_sum += weight
+            
+            weighted_score = weighted_total / weight_sum if weight_sum > 0 else 0
+            
+            # Store final score
+            job_scores[job_id] = weighted_score
+            
+            # Store match details for debugging
+            job_match_details[job_id] = {
+                "weighted_score": weighted_score,
+                "average_score": sum(cv_chunk_scores) / len(cv_chunk_scores),
+                "max_score": max(cv_chunk_scores) if cv_chunk_scores else 0,
+                "top_matches": top_matches[:3]  # Keep top 3 matches for debugging
             }
             
-            for collection_key, collection_config in self.collections.items():
-                collection_name = collection_config["name"]
-                
-                if collection_name in existing_collections:
-                    logger.debug(f"Collection {collection_name} already exists")
-                    continue
-                    
-                logger.info(f"Creating collection: {collection_name}")
-                self.client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=qdrant_models.VectorParams(
-                        size=collection_config["vector_size"],
-                        distance=collection_config["distance"]
-                    )
-                )
-                logger.info(f"Created collection: {collection_name}")
-                
-        except Exception as e:
-            logger.error(f"Error ensuring collections exist: {str(e)}")
-            raise
+            logger.info(f"Job {job_id}: weighted_score={weighted_score:.4f}, avg={job_match_details[job_id]['average_score']:.4f}, max={job_match_details[job_id]['max_score']:.4f}")
     
-    def upsert_embeddings(
-        self, 
-        collection_name: str,
-        ids: List[str],
-        embeddings: List[List[float]],
-        payloads: List[dict] = None,
-        batch_size: int = 100
-    ) -> bool:
-        """
-        Insert or update embeddings in Qdrant with batching and error handling
-        
-        Args:
-            collection_name: Name of the collection to upsert to
-            ids: List of document IDs
-            embeddings: List of embedding vectors
-            payloads: List of metadata payloads (optional)
-            batch_size: Number of records to process in each batch
-            
-        Returns:
-            bool: True if operation was successful
-        """
-        if not payloads:
-            payloads = [{} for _ in range(len(ids))]
-            
-        if len(ids) != len(embeddings) or len(ids) != len(payloads):
-            raise ValueError("Length of ids, embeddings, and payloads must match")
-            
-        try:
-            # Process in batches to avoid timeouts
-            for i in range(0, len(ids), batch_size):
-                batch_ids = ids[i:i + batch_size]
-                batch_embeddings = embeddings[i:i + batch_size]
-                batch_payloads = payloads[i:i + batch_size]
-                
-                points = [
-                    PointStruct(
-                        id=str(idx),
-                        vector=embedding,
-                        payload=payload
-                    )
-                    for idx, embedding, payload in zip(batch_ids, batch_embeddings, batch_payloads)
-                ]
-                
-                self.client.upsert(
-                    collection_name=collection_name,
-                    points=points,
-                    wait=True
-                )
-                logger.debug(f"Upserted batch {i//batch_size + 1}/{(len(ids)-1)//batch_size + 1}")
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error upserting embeddings to {collection_name}: {str(e)}")
-            return False
+    # Sort all jobs by weighted score, descending
+    sorted_jobs = sorted(job_scores.items(), key=lambda item: item[1], reverse=True)
     
-    def search_similar(
-        self,
-        collection_name: str,
-        query_embedding: List[float],
-        limit: int = 5,
-        score_threshold: float = 0.5,
-        filter_conditions: Optional[dict] = None
-    ) -> List[dict]:
-        """
-        Search for similar vectors in the collection with filtering
-        
-        Args:
-            collection_name: Name of the collection to search in
-            query_embedding: Query embedding vector
-            limit: Maximum number of results to return
-            score_threshold: Minimum similarity score (0.0 to 1.0)
-            filter_conditions: Optional filter conditions for the search
-            
-        Returns:
-            List of search results with scores and payloads
-        """
-        try:
-            # Convert filter conditions to Qdrant filter if provided
-            qdrant_filter = None
-            if filter_conditions:
-                must_conditions = []
-                for field, value in filter_conditions.items():
-                    if isinstance(value, (list, tuple)):
-                        must_conditions.append(
-                            qdrant_models.FieldCondition(
-                                key=field,
-                                match=qdrant_models.MatchAny(any=value)
-                            )
-                        )
-                    else:
-                        must_conditions.append(
-                            qdrant_models.FieldCondition(
-                                key=field,
-                                match=qdrant_models.MatchValue(value=value)
-                            )
-                        )
-                qdrant_filter = qdrant_models.Filter(must=must_conditions)
-            
-            search_result = self.client.search(
-                collection_name=collection_name,
-                query_vector=query_embedding,
-                query_filter=qdrant_filter,
-                limit=min(limit, 100),  # Cap at 100 results
-                score_threshold=score_threshold,
-                with_vectors=False,
-                with_payload=True
-            )
-            
-            return [
-                {
-                    "id": hit.id,
-                    "score": hit.score,
-                    "payload": hit.payload or {}
-                }
-                for hit in search_result
-            ]
-            
-        except Exception as e:
-            logger.error(f"Error searching in {collection_name}: {str(e)}")
-            return []
-            
-    def get_collection_info(self, collection_name: str) -> Optional[dict]:
-        """Get information about a collection"""
-        try:
-            collection_info = self.client.get_collection(collection_name)
-            return {
-                "name": collection_info.name,
-                "status": collection_info.status,
-                "vectors_count": collection_info.vectors_count,
-                "points_count": collection_info.points_count,
-                "config": {
-                    "params": collection_info.config.params.dict() if collection_info.config.params else {},
-                    "hnsw_config": collection_info.config.hnsw_config.dict() if collection_info.config.hnsw_config else {},
-                    "optimizer_config": collection_info.config.optimizer_config.dict() if collection_info.config.optimizer_config else {},
-                    "wal_config": collection_info.config.wal_config.dict() if collection_info.config.wal_config else {}
-                }
-            }
-        except Exception as e:
-            logger.error(f"Error getting collection info for {collection_name}: {str(e)}")
-            return None
-
-class GeminiResumeTailor:
-    """Handles resume tailoring using Gemini Flash 2.5"""
-    
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
-        
-    def generate_tailored_resume(
-        self,
-        original_resume: str,
-        job_description: str,
-        matching_keywords: List[str],
-        missing_keywords: List[str]
-    ) -> str:
-        """Generate a tailored version of the resume for a specific job"""
-        prompt = f"""
-        You are an expert resume writer. Please tailor the following resume to better match the job description.
-        Focus on emphasizing the matching skills and incorporating missing keywords naturally.
-        
-        Job Description:
-        {job_description}
-        
-        Matching Keywords (emphasize these):
-        {', '.join(matching_keywords)}
-        
-        Missing Keywords (try to incorporate these naturally):
-        {', '.join(missing_keywords)}
-        
-        Original Resume:
-        {original_resume}
-        
-        Please return ONLY the improved resume text, with no additional commentary or explanations.
-        """
-        
-        try:
-            response = self.model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            logger.error(f"Error generating tailored resume: {str(e)}")
-            return original_resume
-
-class JobMatcher:
-    """Main class for job matching and resume tailoring"""
-    
-    def __init__(self):
-        # Initialize components
-        self.embedder = BGE_M3_Embedder()
-        self.qdrant = QdrantManager()
-        self.resume_tailor = GeminiResumeTailor()
-        
-        # Ensure Qdrant collections exist
-        self.qdrant.ensure_collections_exist(
-            vector_size=self.embedder.dimension
-        )
-    
-    def extract_keywords(self, text: str) -> List[str]:
-        """Extract important keywords from text"""
-        # Simple implementation - can be enhanced with more sophisticated NLP
-        words = text.lower().split()
-        # Filter out common words and get unique words
-        stop_words = {"the", "and", "or", "in", "on", "at", "to", "for", "with"}
-        return list(set(word for word in words if word.isalpha() and word not in stop_words))
-    
-    def calculate_keyword_overlap(
-        self, 
-        resume_keywords: List[str], 
-        job_keywords: List[str]
-    ) -> Tuple[List[str], List[str]]:
-        """Calculate matching and missing keywords"""
-        resume_keywords_set = set(resume_keywords)
-        job_keywords_set = set(job_keywords)
-        
-        matching = list(resume_keywords_set.intersection(job_keywords_set))
-        missing = list(job_keywords_set - resume_keywords_set)
-        
-        return matching, missing
-    
-    def add_resume(
-        self, 
-        resume_id: str,
-        resume_text: str,
-        metadata: dict = None
-    ) -> bool:
-        """Add a resume to the system"""
-        # Generate embedding
-        embedding = self.embedder.embed([resume_text])[0]
-        
-        # Prepare payload
-        payload = {
-            "text": resume_text,
-            "type": "resume",
-            "timestamp": datetime.utcnow().isoformat(),
-            "keywords": self.extract_keywords(resume_text)
+    # Format the output with additional information
+    all_matches = []
+    for job_id, score in sorted_jobs:
+        match_info = {
+            "job_id": job_id,
+            "score": score,
+            # Add these fields for debugging but comment them out in production
+            # "max_score": job_match_details[job_id]["max_score"],
+            # "avg_score": job_match_details[job_id]["average_score"]
         }
-        if metadata:
-            payload.update(metadata)
-        
-        # Store in Qdrant
-        return self.qdrant.upsert_embeddings(
-            collection_name=self.qdrant.collections["cv_embeddings_BGE"]["name"],
-            ids=[resume_id],
-            embeddings=[embedding],
-            payloads=[payload]
-        )
+        all_matches.append(match_info)
     
-    def add_job(
-        self,
-        job_id: str,
-        job_description: str,
-        metadata: dict = None
-    ) -> bool:
-        """Add a job to the system"""
-        # Generate embedding
-        embedding = self.embedder.embed([job_description])[0]
-        
-        # Prepare payload
-        payload = {
-            "text": job_description,
-            "type": "job",
-            "timestamp": datetime.utcnow().isoformat(),
-            "keywords": self.extract_keywords(job_description)
-        }
-        if metadata:
-            payload.update(metadata)
-        
-        # Store in Qdrant
-        return self.qdrant.upsert_embeddings(
-            collection_name=self.qdrant.collections["job_embeddings_BGE"]["name"],
-            ids=[job_id],
-            embeddings=[embedding],
-            payloads=[payload]
-        )
-    
-    def find_matching_jobs(
-        self,
-        resume_id: str,
-        top_k: int = 5,
-        score_threshold: float = 0.5
-    ) -> List[dict]:
-        """Find the best matching jobs for a resume"""
-        # Get resume embedding
-        resume = self.qdrant.client.retrieve(
-            collection_name=self.qdrant.collections["cv_embeddings_BGE"],
-            ids=[resume_id]
-        )
-        
-        if not resume:
-            logger.warning(f"No resume found with ID: {resume_id}")
-            return []
-            
-        resume_embedding = resume[0].vector
-        resume_keywords = resume[0].payload.get("keywords", [])
-        
-        # Search for similar jobs
-        matching_jobs = self.qdrant.search_similar(
-            collection_name=self.qdrant.collections["job_embeddings_BGE"],
-            query_embedding=resume_embedding,
-            limit=top_k,
-            score_threshold=score_threshold
-        )
-        
-        # Add keyword analysis
-        for job in matching_jobs:
-            job_keywords = job["payload"].get("keywords", [])
-            matching, missing = self.calculate_keyword_overlap(
-                resume_keywords, job_keywords
-            )
-            job["matching_keywords"] = matching
-            job["missing_keywords"] = missing
-        
-        return matching_jobs
-    
-    def tailor_resume_for_job(
-        self,
-        resume_id: str,
-        job_id: str
-    ) -> dict:
-        """Generate a tailored version of a resume for a specific job"""
-        # Get resume and job data
-        resume = self.qdrant.client.retrieve(
-            collection_name=self.qdrant.collections["cv_embeddings_BGE"],
-            ids=[resume_id]
-        )
-        
-        job = self.qdrant.client.retrieve(
-            collection_name=self.qdrant.collections["job_embeddings_BGE"],
-            ids=[str(job_id)]
-        )
-        
-        if not resume or not job:
-            logger.error("Resume or job not found")
-            return None
-            
-        resume_data = resume[0].payload
-        job_data = job[0].payload
-        
-        # Get keyword analysis
-        matching_keywords, missing_keywords = self.calculate_keyword_overlap(
-            resume_data.get("keywords", []),
-            job_data.get("keywords", [])
-        )
-        
-        # Generate tailored resume
-        tailored_resume = self.resume_tailor.generate_tailored_resume(
-            original_resume=resume_data["text"],
-            job_description=job_data["text"],
-            matching_keywords=matching_keywords,
-            missing_keywords=missing_keywords
-        )
-        
-        return {
-            "original_resume": resume_data["text"],
-            "tailored_resume": tailored_resume,
-            "job_description": job_data["text"],
-            "matching_keywords": matching_keywords,
-            "missing_keywords": missing_keywords,
-            "original_keywords": resume_data.get("keywords", []),
-            "job_keywords": job_data.get("keywords", [])
-        }
+    logger.info(f"Finished matching. Found {len(all_matches)} potential matches.")
+    return all_matches
 
-# Example usage
+# --- UTILITIES FOR DEBUGGING ---
+# Función movida a src/qdrant_utils.py
+
+# --- MAIN EXECUTION ---
+def main(args_list=None):
+    """Main function to run the job matching script from the command line.
+    
+    Args:
+        args_list: Optional list of command line arguments. If None, sys.argv[1:] is used.
+    """
+    parser = argparse.ArgumentParser(description="Match a CV to the best job offers.")
+    parser.add_argument('--cv_id', type=str, required=True, help='The document ID of the CV to match.')
+    parser.add_argument('--cv_collection', type=str, default="cv_embeddings_BGE2", help='Qdrant collection for CVs.')
+    parser.add_argument('--job_collection', type=str, default="job_embeddings_BGE2", help='Qdrant collection for jobs.')
+    parser.add_argument('--top_k', type=int, default=5, help='Number of top job matches to return.')
+    parser.add_argument('--job_ids', type=str, nargs='*', help='Optional: Specific job IDs to match against (if not provided, matches against all jobs)')
+    args = parser.parse_args(args_list)
+
+    try:
+        # Usar cliente centralizado con configuración optimizada
+        client = get_qdrant_client(use_http=True, timeout=60.0)
+        client.get_collections() # Verify connection
+    except Exception as e:
+        logger.critical(f"Failed to connect to Qdrant. Error: {e}")
+        return
+
+    # Debug document IDs
+    logger.info(f"CV ID to find: {args.cv_id}")
+    cv_doc_ids = list_document_ids(client, args.cv_collection)
+    job_doc_ids = list_document_ids(client, args.job_collection)
+
+    # Try to match with both original and alternative formats
+    cv_found = False
+    if args.cv_id in cv_doc_ids:
+        logger.info(f"Found exact match for CV ID: {args.cv_id}")
+        cv_found = True
+    elif cv_doc_ids:  # If we have any CV documents
+        # Maybe the CV ID has been processed differently (e.g., stem vs. full name)
+        logger.warning(f"Could not find exact CV ID: {args.cv_id} in collection")
+        logger.info(f"Available CV IDs: {cv_doc_ids}")
+        
+        # Let's find the most similar document ID
+        import difflib
+        closest_match = difflib.get_close_matches(args.cv_id, cv_doc_ids, n=1, cutoff=0.1)
+        if closest_match:
+            alternative_id = closest_match[0]
+            logger.warning(f"Using alternative CV ID: {alternative_id} instead of {args.cv_id}")
+            args.cv_id = alternative_id
+            cv_found = True
+
+    if not cv_found:
+        logger.error(f"Could not find any matching CV ID. Aborting match.")
+        print("[]")
+        return
+
+    matches = match_cv_to_jobs(client, args.cv_id, args.cv_collection, args.job_collection, args.job_ids)
+
+    import json
+    print(json.dumps(matches))
+
 if __name__ == "__main__":
-    # Initialize the matcher
-    matcher = JobMatcher()
-    
-    # Example: Add a resume
-    resume_id = "resume_123"
-    resume_text = """
-    John Doe
-    Senior Software Engineer
-    
-    Skills: Python, Django, Flask, AWS, Docker, Kubernetes, CI/CD
-    Experience: 5+ years in backend development
-    Education: BS in Computer Science
-    """
-    
-    matcher.add_resume(
-        resume_id=resume_id,
-        resume_text=resume_text,
-        metadata={"name": "John Doe", "email": "john@example.com"}
-    )
-    
-    # Example: Add a job
-    job_id = "job_456"
-    job_description = """
-    Senior Backend Developer
-    
-    We are looking for an experienced backend developer with:
-    - Strong Python skills (Django/Flask)
-    - Experience with cloud platforms (AWS/GCP)
-    - Knowledge of containerization (Docker, Kubernetes)
-    - Experience with CI/CD pipelines
-    - Experience with database design and optimization
-    
-    Nice to have:
-    - Experience with microservices architecture
-    - Knowledge of machine learning
-    """
-    
-    matcher.add_job(
-        job_id=job_id,
-        job_description=job_description,
-        metadata={"title": "Senior Backend Developer", "company": "TechCorp"}
-    )
-    
-    # Find matching jobs for the resume
-    print("Finding matching jobs...")
-    matches = matcher.find_matching_jobs(resume_id, top_k=3)
-    print(f"Found {len(matches)} matching jobs")
-    
-    if matches:
-        best_match = matches[0]
-        print(f"\nBest match: {best_match['payload'].get('title', 'N/A')}")
-        print(f"Similarity score: {best_match['score']:.2f}")
-        print("Matching keywords:", ", ".join(best_match['matching_keywords']))
-        print("Missing keywords:", ", ".join(best_match['missing_keywords']))
-        
-        # Generate tailored resume for the best match
-        print("\nGenerating tailored resume...")
-        result = matcher.tailor_resume_for_job(resume_id, best_match['id'])
-        
-        if result:
-            print("\n=== Original Resume Keywords ===")
-            print(", ".join(result["original_keywords"][:10]) + "...")
-            
-            print("\n=== Job Keywords ===")
-            print(", ".join(result["job_keywords"][:10]) + "...")
-            
-            print("\n=== Matching Keywords ===")
-            print(", ".join(result["matching_keywords"]))
-            
-            print("\n=== Missing Keywords ===")
-            print(", ".join(result["missing_keywords"]))
-            
-            print("\n=== Tailored Resume ===")
-            print(result["tailored_resume"])
+    main()

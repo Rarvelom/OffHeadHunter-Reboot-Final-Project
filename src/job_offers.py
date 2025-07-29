@@ -8,7 +8,6 @@ from qdrant_client.http import models
 from src.qdrant_storage import QdrantStorage
 from src.text_processing import TextProcessor
 from src.pdf_processor import PDFProcessor
-from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -57,44 +56,26 @@ class JobOfferStorage:
             try:
                 # Generar el embedding
                 embedding = self.text_processor.generate_embeddings([text_to_embed])[0].tolist()
+                logger.info(f"Embedding type: {type(embedding)}, length: {len(embedding)} (should be 1024)")
+                logger.info(f"First 5 values of embedding: {embedding[:5] if embedding else 'EMPTY'}")
                 
                 # Generar un nuevo UUID para Qdrant
                 point_id = str(uuid.uuid4())
                 
-                # Preparar metadatos completos usando el método _prepare_metadata
-                has_pdf = bool(pdf_text)
-                payload = self._prepare_metadata(job_offer, has_pdf)
+                # Crear un payload más simple para Qdrant
+                payload = {
+                    "title": job_offer.get('title', ''),
+                    "company": job_offer.get('company', ''),
+                    "source_url": job_offer.get('url', ''),
+                    "has_pdf": bool(pdf_text)
+                }
                 
-                # Asegurarse de que los campos básicos estén presentes
-                if 'user_id' not in payload or not payload['user_id']:
-                    payload['user_id'] = job_offer.get('user_id')
-                if 'title' not in payload or not payload['title']:
-                    payload['title'] = job_offer.get('title', 'Sin título')
-                if 'company' not in payload or not payload['company']:
-                    payload['company'] = job_offer.get('company', 'Empresa no especificada')
-                if 'source_url' not in payload or not payload['source_url']:
-                    payload['source_url'] = job_offer.get('url', '')
-                if 'has_pdf' not in payload:
-                    payload['has_pdf'] = has_pdf
-                    
-                # Asegurar que los campos de timestamp estén presentes y en el formato correcto
-                current_time = get_current_utc_timestamp()
-                
-                # Establecer created_at si no existe
-                if 'created_at' not in payload or not payload['created_at']:
-                    payload['created_at'] = current_time
-                else:
-                    # Convertir a formato unix si es necesario
-                    payload['created_at'] = to_unix_timestamp(payload['created_at'])
-                
-                # Asegurar que scraped_at esté en formato unix
-                if 'scraped_at' in payload and payload['scraped_at']:
-                    payload['scraped_at'] = to_unix_timestamp(payload['scraped_at'])
-                else:
-                    payload['scraped_at'] = current_time
-                    
-                # Añadir campo de actualización
-                payload['updated_at'] = current_time
+                # Si hay ubicaciones, añadirlas como texto plano
+                if 'locations' in job_offer and job_offer['locations']:
+                    if isinstance(job_offer['locations'], list):
+                        payload["locations"] = ', '.join(str(loc) for loc in job_offer['locations'] if loc)
+                    else:
+                        payload["locations"] = str(job_offer['locations'])
                 
                 logger.info(f"Insertando oferta en Qdrant con ID: {point_id}")
                 
@@ -158,11 +139,6 @@ class JobOfferStorage:
                         "period": salary.get('period', 'year')
                     }
 
-            # Obtener la fecha actual
-            now = datetime.utcnow()
-            now_iso = now.isoformat()
-            now_timestamp = int(now.timestamp())  # Timestamp en segundos
-            
             # Construir metadatos
             metadata = {
                 "title": str(job_offer.get('title', '')),
@@ -170,12 +146,10 @@ class JobOfferStorage:
                 "url": str(job_offer.get('url', '')),
                 "source": "infojobs",
                 "mongodb_id": str(job_offer.get('_id', '')),
-                "created_at": now_iso,
-                "scraped_at": now_timestamp,  # Añadido para filtrado por timestamp
+                "created_at": datetime.utcnow().isoformat(),
                 "has_pdf": has_pdf,
                 "description": str(job_offer.get('description', ''))[:1000],
                 "locations": locations,
-                "user_id": job_offer.get('user_id', ''),
             }
 
             if salary_info:

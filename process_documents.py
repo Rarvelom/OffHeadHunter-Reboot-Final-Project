@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 sys.path.append(str(Path(__file__).parent))
 
 from src.text_processing import TextProcessor
-from src.unified_storage import UnifiedStorage
 from src.pdf_processor import PDFProcessor
+from src.qdrant_storage import QdrantStorage
 
 # Load environment variables
 load_dotenv()
@@ -22,8 +22,8 @@ def process_pdf_file(
     collection_name: str = "cv_embeddings",
     user_id: str = None,
     document_type: str = "cv",
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200,
+    chunk_size: int = None,
+    chunk_overlap: int = None,
     batch_size: int = 32,
     source: str = "cv_upload"
 ) -> Dict[str, Any]:
@@ -51,70 +51,84 @@ def process_pdf_file(
         return {"success": False, "error": f"File {file_path} is not a PDF."}
     
     try:
-        # Initialize text processor, PDF processor, and storage
+        # Initialize processors and storage
         text_processor = TextProcessor()
         pdf_processor = PDFProcessor(extract_metadata=True)
-        storage = UnifiedStorage(
-            collection_name=collection_name,
-            user_id=user_id
-        )
-        
+        storage = QdrantStorage(collection_name=collection_name)
+
         # Process the PDF file
         print(f"Processing PDF: {file_path.name}")
         pdf_data = pdf_processor.process_pdf(file_path)
-        
+
         # Extract text and metadata
         text = pdf_data.get('text', '').strip()
         if not text:
             return {"success": False, "error": f"No text could be extracted from {file_path}"}
-        
+
         # Get metadata from PDF or use defaults
-        metadata = pdf_data.get('metadata', {})
-        metadata.update({
+        document_metadata = pdf_data.get('metadata', {})
+        document_metadata.update({
             'file_name': file_path.name,
             'file_path': str(file_path),
             'document_type': document_type,
             'num_pages': pdf_data.get('num_pages', 0),
-            'user_id': user_id
+            'source': source
         })
-        
-        # Split text into chunks
-        chunks = text_processor.split_into_chunks(
-            text,
+
+        # Process document with intelligent semantic chunking
+        # This now returns chunks with embeddings already generated
+        processed_chunks = text_processor.process_document(
+            file_path,
+            document_type=document_type,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap
         )
+
+        total_chunks = len(processed_chunks)
+        print(f"Document processed into {total_chunks} semantic chunks")
         
-        total_chunks = len(chunks)
-        print(f"Document split into {total_chunks} chunks")
-        
-        # Process each chunk
-        for i, chunk in enumerate(chunks):
-            # Generate a unique ID for the chunk
-            document_id = f"{file_path.stem}-chunk-{i}"
+        # Log chunking strategy details
+        if processed_chunks:
+            strategy = processed_chunks[0].get('chunk_strategy', 'unknown')
+            print(f"Chunking strategy: {strategy}")
             
-            # Generate embedding for the chunk
-            embedding = text_processor.embed_text(chunk)
+            # Count complete sections vs fragmented sections
+            complete_sections = sum(1 for chunk in processed_chunks if chunk.get('is_complete_section', False))
+            fragmented_sections = total_chunks - complete_sections
+            print(f"Complete sections: {complete_sections}, Fragmented chunks: {fragmented_sections}")
+
+        # Prepare chunks for storage (embeddings already included)
+        chunks_to_store = []
+        for chunk_data in processed_chunks:
+            chunk_to_store = {
+                "text": chunk_data['text'],
+                "embedding": chunk_data['embedding']  # Already in list format
+            }
             
-            # Add chunk-specific metadata
-            chunk_metadata = metadata.copy()
-            chunk_metadata.update({
-                'chunk_index': i,
-                'total_chunks': total_chunks,
-                'chunk_size': len(chunk.split())  # Approximate word count
-            })
-            
-            # Store in MongoDB and Qdrant
-            storage.store_embedding(
-                text=chunk,
-                embedding=embedding,
-                document_id=document_id,
-                metadata=chunk_metadata,
-                source=source
-            )
-            
-            if (i + 1) % 10 == 0 or (i + 1) == total_chunks:
-                print(f"Processed chunk {i + 1}/{total_chunks}")
+            # Add semantic metadata if available
+            if 'section' in chunk_data:
+                chunk_to_store['section'] = chunk_data['section']
+            if 'is_complete_section' in chunk_data:
+                chunk_to_store['is_complete_section'] = chunk_data['is_complete_section']
+            if 'chunk_index' in chunk_data:
+                chunk_to_store['chunk_index'] = chunk_data['chunk_index']
+            if 'total_chunks_in_section' in chunk_data:
+                chunk_to_store['total_chunks_in_section'] = chunk_data['total_chunks_in_section']
+            if 'num_tokens' in chunk_data:
+                chunk_to_store['num_tokens'] = chunk_data['num_tokens']
+                
+            chunks_to_store.append(chunk_to_store)
+
+        # Store all chunks in a single batch operation
+        document_id = str(file_path.stem)
+        stored_ids = storage.store_embeddings(
+            document_id=document_id,
+            chunks=chunks_to_store,
+            metadata=document_metadata,
+            user_id=user_id,
+            batch_size=batch_size
+        )
+        print(f"Stored {len(stored_ids)} chunks for document {document_id}")
         
         return {
             "success": True,
@@ -206,7 +220,8 @@ def process_pdf_directory(
     }
 
 def main():
-    parser = argparse.ArgumentParser(description='Process PDF documents and generate embeddings.')
+    import argparse
+    parser = argparse.ArgumentParser(description="Procesa documentos (CVs o ofertas de trabajo) y almacena sus embeddings.")
     
     # Input options
     input_group = parser.add_argument_group('Input Options')
@@ -226,12 +241,11 @@ def main():
     process_group = parser.add_argument_group('Processing Options')
     process_group.add_argument('--collection', type=str, default='cv_embeddings',
                              help='Collection name for storing embeddings (default: cv_embeddings)')
-    process_group.add_argument('--user-id', type=str, default=None,
-                             help='ID of the user who owns the documents')
-    process_group.add_argument('--chunk-size', type=int, default=1000,
-                             help='Maximum tokens per chunk (default: 1000)')
-    process_group.add_argument('--overlap', type=int, default=200,
-                             help='Overlap between chunks in tokens (default: 200)')
+    process_group.add_argument('--user-id', type=str, help='ID del usuario (opcional).')
+    process_group.add_argument('--chunk-size', type=int, default=None,
+                             help='Maximum tokens per chunk (uses optimized defaults: CV=1500, Job=1000)')
+    process_group.add_argument('--overlap', type=int, default=None,
+                             help='Overlap between chunks in tokens (uses optimized defaults: CV=300, Job=200)')
     process_group.add_argument('--batch-size', type=int, default=32,
                              help='Batch size for processing embeddings (default: 32)')
     
@@ -244,8 +258,19 @@ def main():
     print(f"Source: {args.source}")
     print(f"Collection: {args.collection}")
     print(f"User ID: {args.user_id or 'Not specified'}")
-    print(f"Chunk size: {args.chunk_size} tokens")
-    print(f"Chunk overlap: {args.overlap} tokens")
+    # Mostrar configuración de chunking (optimizada o personalizada)
+    if args.chunk_size is None:
+        chunk_info = f"Optimized for {args.document_type.upper()} (CV=1500, Job=1000 tokens)"
+    else:
+        chunk_info = f"{args.chunk_size} tokens (custom)"
+    
+    if args.overlap is None:
+        overlap_info = f"Optimized for {args.document_type.upper()} (CV=300, Job=200 tokens)"
+    else:
+        overlap_info = f"{args.overlap} tokens (custom)"
+    
+    print(f"Chunk size: {chunk_info}")
+    print(f"Chunk overlap: {overlap_info}")
     print(f"Batch size: {args.batch_size}")
     print("="*70 + "\n")
     
@@ -293,8 +318,12 @@ def main():
             print(f"  ✗ Failed: {result['files_failed']}")
             print(f"Total chunks processed: {result['total_chunks_processed']}")
         else:  # Single file processing result
+            doc_id = Path(result.get('file_name', '')).stem
             print(f"File: {result.get('file_name', 'Unknown')}")
             print(f"Chunks processed: {result.get('total_documents_processed', 0)}")
+            # Imprimir el ID del documento para que el pipeline lo capture
+            if doc_id:
+                print(f"PROCESSED_DOC_ID:{doc_id}")
         
         print(f"\nCollection: {result['collection_name']}")
         print(f"Storage backends: {', '.join(result.get('storage_backends', ['mongodb', 'qdrant']))}")

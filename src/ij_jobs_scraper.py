@@ -1,3 +1,4 @@
+import time
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -6,7 +7,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
-from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp
 import random
 import time
 import re
@@ -38,21 +38,16 @@ def parse_posted_at(fecha_publicacion):
         fecha = fecha_publicacion.lower().replace('hace', '').strip()
         if 'm' in fecha:  # minutos
             mins = int(fecha.replace('m', '').strip())
-            dt = now - timedelta(minutes=mins)
+            return (now - timedelta(minutes=mins)).isoformat()
         elif 'h' in fecha:  # horas
             hours = int(fecha.replace('h', '').strip())
-            dt = now - timedelta(hours=hours)
+            return (now - timedelta(hours=hours)).isoformat()
         elif 'día' in fecha or 'días' in fecha:  # días
             days = int(re.findall(r'(\d+)', fecha)[0])
-            dt = now - timedelta(days=days)
-        else:
-            return None
-            
-        # Convertir a timestamp Unix (segundos desde epoch)
-        return int(dt.timestamp())
-    except Exception as e:
-        print(f"Error al parsear fecha '{fecha_publicacion}': {e}")
+            return (now - timedelta(days=days)).isoformat()
+    except Exception:
         return None
+    return None
 
 USER_AGENTS = [
     # Algunos user agents de ejemplo
@@ -63,7 +58,6 @@ USER_AGENTS = [
 
 SOURCE_ID = "64e5c2d6f0a5e7a4f3b1c2d3"  # O el que uses
 
-# !!!BORRAR MAS ADELANTE!!! FUNCIÓN CON LÓGICA DUPLICADA EN "ij_pdf_exporter.py", de momento se ha desactivado su inicialización en "def scrape_jobs()" para evitar generar entradas duplicadas.
 def save_to_mongodb(jobs_data):
     load_dotenv()
     mongodb_uri = os.getenv('MONGODB_URI')
@@ -103,40 +97,41 @@ def scrape_jobs(page_url):
 
     try:
         driver.get(page_url)
+        time.sleep(random.uniform(2.5, 4.0))
+
         # Manejo popup cookies
         try:
             disagree_button = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "didomi-notice-disagree-button"))
             )
             disagree_button.click()
+            time.sleep(random.uniform(1.0, 2.0))
             WebDriverWait(driver, 10).until(
                 EC.invisibility_of_element_located((By.ID, "didomi-notice-disagree-button"))
             )
         except TimeoutException:
-            pass
-        except Exception:
-            pass
-
-        # Hacer click en el botón con id="buttonKeyword" tras el manejo de cookies
-        try:
-            keyword_button = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "buttonKeyword"))
-            )
-            keyword_button.click()
-            time.sleep(3)
+            print("INFO: No se encontró el popup de cookies o ya fue gestionado.")
         except Exception as e:
-            print(f"No se pudo hacer click en el botón 'buttonKeyword': {e}")
+            print(f"WARN: No se pudo gestionar el popup de cookies: {e}")
 
-        # Scroll humano y simulación de movimiento de ratón para cargar todas las ofertas
-        SCROLL_PAUSE_TIME = 0.5
-        SCROLL_STEP = 500
-        MAX_SCROLL = 5500
-        actions = ActionChains(driver)
-        for y in range(0, MAX_SCROLL, SCROLL_STEP):
-            driver.execute_script(f"window.scrollTo(0, {y});")
-            actions.move_by_offset(0, 10).perform()
-            time.sleep(SCROLL_PAUSE_TIME)
-
+        # Scroll down to load all offers with human-like behavior
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        consecutive_scrolls_without_change = 0
+        
+        while consecutive_scrolls_without_change < 3: # Stop if height doesn't change for 3 scrolls
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(random.uniform(1.5, 2.5)) # Wait for page to load
+            
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            
+            if new_height == last_height:
+                consecutive_scrolls_without_change += 1
+                time.sleep(random.uniform(0.5, 1.0)) # Small wait before retrying
+            else:
+                consecutive_scrolls_without_change = 0 # Reset counter
+            
+            last_height = new_height
+        time.sleep(random.uniform(1.0, 2.0)) # Final wait before parsing
         page = driver.page_source
         soup = BeautifulSoup(page, 'html.parser')
         offer_cards = soup.select(
@@ -145,7 +140,7 @@ def scrape_jobs(page_url):
 
         results = []
         # for card in offer_cards: # DESCOMENTAR PARA PRODUCCIÓN
-        for card in offer_cards:  # SOLO PARA PRUEBAS!!! procesa los primeros 5 elementos
+        for card in offer_cards[:10]:  # SOLO PARA PRUEBAS!!! procesa los primeros 5 elementos
             title_a = card.select_one('a.ij-OfferCardContent-description-title-link')
             offer_url = title_a['href'] if title_a and title_a.has_attr('href') else None
             if offer_url and offer_url.startswith('//'):
@@ -194,7 +189,7 @@ def scrape_jobs(page_url):
 
             tags = list(filter(None, [contract_type, workday_type, modality]))
             external_id = extract_external_id(offer_url) if offer_url else None
-            scraped_at = get_current_utc_timestamp()
+            scraped_at = datetime.now(timezone.utc).isoformat()
 
             mongo_job = {
                 "external_id": external_id,
@@ -204,7 +199,7 @@ def scrape_jobs(page_url):
                 "locations": locations,
                 "description": description,
                 "url": offer_url,
-                "posted_at": to_unix_timestamp(posted_at) if posted_at else None,
+                "posted_at": posted_at,
                 "scraped_at": scraped_at,
                 "tags": tags,
                 "salary_range": salary_range,
@@ -213,7 +208,7 @@ def scrape_jobs(page_url):
             }
             results.append(mongo_job)
 
-        # save_to_mongodb(results)
+        save_to_mongodb(results)
         
         return results
 

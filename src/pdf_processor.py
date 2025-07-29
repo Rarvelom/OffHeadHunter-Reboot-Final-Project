@@ -3,10 +3,6 @@ import pymupdf  # PyMuPDF
 from typing import List, Dict, Optional, Tuple, Union
 from pathlib import Path
 import logging
-from datetime import datetime
-
-# Import time utilities
-from src.utils.time_utils import get_current_utc_timestamp, to_iso_format, to_unix_timestamp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -60,9 +56,6 @@ class PDFProcessor:
                 if self.extract_metadata and doc.metadata:
                     metadata = self._clean_metadata(doc.metadata)
                 
-                # Add processing timestamp
-                metadata['processed_at'] = get_current_utc_timestamp()
-                
                 return {
                     'text': text.strip(),
                     'metadata': metadata,
@@ -81,45 +74,14 @@ class PDFProcessor:
             metadata: Raw PDF metadata
             
         Returns:
-            Cleaned metadata dictionary with normalized timestamps
+            Cleaned metadata dictionary
         """
         cleaned = {}
-        timestamp_fields = ['creationdate', 'moddate', 'processed_at']
-        
         for key, value in metadata.items():
-            if not value:  # Skip None or empty values
-                continue
-                
-            # Convert key to lowercase and replace spaces with underscores
-            clean_key = key.lower().replace(' ', '_')
-            
-            # Handle timestamp fields
-            if clean_key in timestamp_fields and value:
-                try:
-                    # Convertir a formato Unix timestamp si es posible
-                    if isinstance(value, (int, float)):
-                        cleaned[clean_key] = int(value)
-                    elif isinstance(value, str):
-                        # Intentar parsear la fecha del PDF
-                        if value.startswith('D:'):
-                            # Formato común en PDFs: D:YYYYMMDDHHmmSSOHH'mm'
-                            date_str = value[2:18]  # Tomar solo la parte de la fecha
-                            dt = datetime.strptime(date_str, '%Y%m%d%H%M%S')
-                            cleaned[clean_key] = int(dt.timestamp())
-                        else:
-                            # Intentar con otros formatos
-                            cleaned[clean_key] = to_unix_timestamp(value) or value
-                    elif hasattr(value, 'timestamp'):
-                        # Si es un objeto datetime
-                        cleaned[clean_key] = int(value.timestamp())
-                    else:
-                        cleaned[clean_key] = value
-                except Exception as e:
-                    logger.warning(f"Error al procesar campo de fecha {clean_key}: {e}")
-                    cleaned[clean_key] = value
-            else:
+            if value:  # Skip None or empty values
+                # Convert key to lowercase and replace spaces with underscores
+                clean_key = key.lower().replace(' ', '_')
                 cleaned[clean_key] = value
-                
         return cleaned
     
     def process_directory(self, directory: Union[str, Path], 

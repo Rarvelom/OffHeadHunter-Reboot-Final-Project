@@ -10,6 +10,43 @@ from sentence_transformers import SentenceTransformer
 from unstructured.partition.auto import partition
 
 class TextProcessor:
+    def split_by_sections(self, text: str) -> list:
+        """
+        Divide el texto en secciones usando encabezados típicos de CVs/job offers.
+        Retorna una lista de dicts: [{'section': <nombre>, 'text': <texto>}]
+        """
+        # Encabezados comunes en español e inglés
+        section_headers = [
+            r"(?:^|\n)[ \t]*((experiencia laboral|experiencia profesional|experience|work experience|professional experience)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((educaci[oó]n|formaci[oó]n|education|academic background)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((habilidades|skills|competencias)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((resumen|summary|profile|perfil profesional|about me)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((proyectos|projects)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((idiomas|languages)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((certificaciones|certifications)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((publicaciones|publications)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((referencias|references)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((logros|achievements)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((intereses|interests)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((objetivo|objective)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((datos personales|personal data|contacto|contact information)[^\n:]*[:\n])",
+            r"(?:^|\n)[ \t]*((informaci[oó]n adicional|additional information)[^\n:]*[:\n])",
+        ]
+        # Unir todos los patrones en uno solo
+        pattern = '|'.join(section_headers)
+        matches = [m for m in re.finditer(pattern, text, re.IGNORECASE)]
+        sections = []
+        for i, match in enumerate(matches):
+            start = match.start()
+            end = matches[i+1].start() if i+1 < len(matches) else len(text)
+            section_title = match.group(1).strip().replace('\n', ' ').replace(':', '').strip() if match.group(1) else 'Seccion'
+            section_text = text[start:end].strip()
+            sections.append({'section': section_title, 'text': section_text})
+        if not sections:
+            sections = [{'section': 'completo', 'text': text}]
+        return sections
+
+
     def __init__(self, model_name: str = 'BAAI/bge-m3'):
         """
         Inicializa el procesador de texto con un modelo de embeddings.
@@ -22,6 +59,24 @@ class TextProcessor:
         # Configurar para usar CPU
         self.model = SentenceTransformer(model_name, device='cpu')
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
+
+    def clean_text(self, text: str) -> str:
+        """
+        Limpia el texto de artefactos y ruido no deseado.
+        """
+        # Eliminar URLs
+        text = re.sub(r'https?://\S+|www\.\S+', '', text)
+        # Eliminar correos electrónicos
+        text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '', text)
+        # Eliminar números de teléfono (formatos variados)
+        text = re.sub(r'\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', '', text)
+        # Eliminar fechas (formatos simples, se puede expandir)
+        text = re.sub(r'\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b', '', text)
+        # Eliminar caracteres especiales repetidos o aislados que no aportan significado
+        text = re.sub(r'[^\w\s.,-]', ' ', text)
+        # Eliminar espacios extra
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
         
     def extract_text_from_file(self, file_path: Union[str, Path]) -> str:
         """
@@ -137,40 +192,177 @@ class TextProcessor:
         
         return embeddings
     
+    def get_optimal_chunk_params(self, document_type: str = "cv") -> Dict[str, int]:
+        """
+        Obtiene parámetros optimizados de chunking según el tipo de documento.
+        
+        Args:
+            document_type: Tipo de documento ('cv' o 'job')
+            
+        Returns:
+            Diccionario con chunk_size y chunk_overlap optimizados
+        """
+        if document_type.lower() == "cv":
+            return {
+                "chunk_size": 1500,  # Más contexto para experiencias completas
+                "chunk_overlap": 300,  # Mayor overlap para continuidad
+                "min_section_tokens": 100  # Mínimo para considerar chunking
+            }
+        elif document_type.lower() == "job":
+            return {
+                "chunk_size": 1000,  # Suficiente para descripciones completas
+                "chunk_overlap": 200,  # Overlap moderado
+                "min_section_tokens": 80   # Mínimo para ofertas más cortas
+            }
+        else:
+            # Valores por defecto
+            return {
+                "chunk_size": 1200,
+                "chunk_overlap": 250,
+                "min_section_tokens": 90
+            }
+    
+    def smart_chunk_section(self, section_text: str, section_name: str, params: Dict[str, int]) -> List[Dict[str, Any]]:
+        """
+        Aplica chunking inteligente a una sección, respetando su semántica.
+        
+        Args:
+            section_text: Texto de la sección
+            section_name: Nombre de la sección
+            params: Parámetros de chunking optimizados
+            
+        Returns:
+            Lista de chunks con metadatos enriquecidos
+        """
+        # Tokenizar para evaluar tamaño
+        tokens = self.tokenizer.encode(section_text, disallowed_special=())
+        section_token_count = len(tokens)
+        
+        chunks = []
+        
+        # Si la sección es pequeña, mantenerla completa
+        if section_token_count <= params["min_section_tokens"]:
+            chunks.append({
+                "text": section_text,
+                "section": section_name,
+                "start_token": 0,
+                "end_token": section_token_count - 1,
+                "num_tokens": section_token_count,
+                "is_complete_section": True,
+                "chunk_index": 0,
+                "total_chunks_in_section": 1
+            })
+            return chunks
+        
+        # Si la sección es mediana y cabe en un chunk, mantenerla completa
+        if section_token_count <= params["chunk_size"]:
+            chunks.append({
+                "text": section_text,
+                "section": section_name,
+                "start_token": 0,
+                "end_token": section_token_count - 1,
+                "num_tokens": section_token_count,
+                "is_complete_section": True,
+                "chunk_index": 0,
+                "total_chunks_in_section": 1
+            })
+            return chunks
+        
+        # Para secciones grandes, aplicar chunking con overlap
+        token_chunks = self.chunk_text(
+            section_text, 
+            params["chunk_size"], 
+            params["chunk_overlap"]
+        )
+        
+        # Enriquecer chunks con metadatos de sección
+        total_chunks = len(token_chunks)
+        for i, chunk in enumerate(token_chunks):
+            chunk.update({
+                "section": section_name,
+                "is_complete_section": False,
+                "chunk_index": i,
+                "total_chunks_in_section": total_chunks
+            })
+            chunks.append(chunk)
+        
+        return chunks
+    
     def process_document(
         self, 
         file_path: Union[str, Path], 
-        chunk_size: int = 1000, 
-        chunk_overlap: int = 200
+        document_type: str = "cv",
+        chunk_size: int = None, 
+        chunk_overlap: int = None
     ) -> List[Dict[str, Any]]:
         """
-        Procesa un documento completo: extrae texto, lo divide en chunks y genera embeddings.
+        Procesa un documento completo con chunking semántico inteligente.
         
         Args:
-            file_path: Ruta al archivo a procesar.
-            chunk_size: Tamaño máximo de cada chunk en tokens.
-            chunk_overlap: Número de tokens de superposición entre chunks consecutivos.
-            
-        Returns:
-            Lista de diccionarios con los chunks, sus metadatos y embeddings.
+            file_path: Ruta al archivo
+            document_type: Tipo de documento ('cv' o 'job') para optimización
+            chunk_size: Tamaño de chunk personalizado (opcional)
+            chunk_overlap: Overlap personalizado (opcional)
         """
-        # Extraer texto
+        # 1. Obtener parámetros optimizados
+        params = self.get_optimal_chunk_params(document_type)
+        
+        # Permitir override de parámetros si se especifican
+        if chunk_size is not None:
+            params["chunk_size"] = chunk_size
+        if chunk_overlap is not None:
+            params["chunk_overlap"] = chunk_overlap
+        
+        # 2. Extraer y limpiar texto
         text = self.extract_text_from_file(file_path)
+        cleaned_text = self.clean_text(text)
+
+        # 3. Dividir en secciones semánticas
+        sections = self.split_by_sections(cleaned_text)
         
-        # Dividir en chunks
-        chunks = self.chunk_text(text, chunk_size, chunk_overlap)
+        # 4. Aplicar chunking inteligente por sección
+        all_chunks = []
+        for section in sections:
+            section_chunks = self.smart_chunk_section(
+                section['text'], 
+                section['section'], 
+                params
+            )
+            all_chunks.extend(section_chunks)
         
-        # Extraer solo los textos para generar embeddings
-        chunk_texts = [chunk["text"] for chunk in chunks]
-        
-        # Generar embeddings para todos los chunks
+        # 5. Si no hay secciones identificadas, procesar como documento completo
+        if len(sections) == 1 and sections[0]['section'] == 'completo':
+            # Aplicar chunking estándar al documento completo
+            token_chunks = self.chunk_text(
+                cleaned_text, 
+                params["chunk_size"], 
+                params["chunk_overlap"]
+            )
+            all_chunks = []
+            for i, chunk in enumerate(token_chunks):
+                chunk.update({
+                    "section": "documento_completo",
+                    "is_complete_section": False,
+                    "chunk_index": i,
+                    "total_chunks_in_section": len(token_chunks)
+                })
+                all_chunks.append(chunk)
+            
+        # 6. Extraer textos para embeddings
+        chunk_texts = [chunk["text"] for chunk in all_chunks]
+        if not chunk_texts:
+            return []
+
+        # 7. Generar embeddings
         embeddings = self.generate_embeddings(chunk_texts)
         
-        # Añadir los embeddings a los chunks
-        for i, chunk in enumerate(chunks):
+        # 8. Añadir embeddings y metadatos finales
+        for i, chunk in enumerate(all_chunks):
             chunk["embedding"] = embeddings[i].tolist()
-        
-        return chunks
+            chunk["document_type"] = document_type
+            chunk["chunk_strategy"] = "semantic_intelligent"
+            
+        return all_chunks
 
 
 # Ejemplo de uso

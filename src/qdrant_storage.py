@@ -16,16 +16,19 @@ logger = logging.getLogger(__name__)
 class QdrantStorage:
     """Clase para manejar el almacenamiento y consulta de embeddings en Qdrant."""
     
-    def __init__(self, collection_name: str = "cv_embeddings"):
+    def __init__(self, collection_name: str = "cv_embeddings_BGE2", use_http=True, timeout=60.0):
         """
         Inicializa el cliente de Qdrant.
         
         Args:
             collection_name: Nombre de la colección a utilizar.
+            use_http: Si es True, usa HTTP en lugar de gRPC (más estable para conexiones lentas)
+            timeout: Tiempo máximo de espera para las operaciones (en segundos)
         """
         from qdrant_config import get_qdrant_client
         
-        self.client = get_qdrant_client()
+        logger.info(f"Inicializando QdrantStorage para colección {collection_name} con HTTP={use_http}, timeout={timeout}s")
+        self.client = get_qdrant_client(use_http=use_http, timeout=timeout)
         self.collection_name = collection_name
         
         # Verificar si la colección existe, si no, crearla
@@ -265,7 +268,7 @@ class QdrantStorage:
 # Ejemplo de uso
 if __name__ == "__main__":
     # Crear una instancia del almacenamiento
-    storage = QdrantStorage(collection_name="cv_embeddings")
+    storage = QdrantStorage(collection_name="cv_embeddings_BGE2")
     
     # Ejemplo de búsqueda (requiere un embedding de consulta)
     try:

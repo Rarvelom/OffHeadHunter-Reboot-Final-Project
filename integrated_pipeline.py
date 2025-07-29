@@ -1,119 +1,32 @@
 import sys
 import os
+import subprocess
 from pathlib import Path
-from typing import List, Dict, Any
 import json
+from job_agent_chatbot import AgentChatbot
+from job_search_agent import JobSearchAgent
+from src.url_gen import generar_url_infojobs
+from src.ij_jobs_scraper import scrape_jobs
+from src.ij_pdf_exporter import export_ij_offer_to_pdf
 
-# Add the project root to the Python path
-project_root = Path(__file__).parent.absolute()
-sys.path.append(str(project_root))
 
-from job_agent_chatbot import AgentChatbot  # 1. Chatbot
-from job_search_agent import JobSearchAgent  # 2. Obtener criterios del usuario
-from src.url_gen import generar_url_infojobs  # 3. Generar URL de búsqueda
-from src.ij_jobs_scraper import scrape_jobs  # 4. Scraping de ofertas
-from src.ij_pdf_exporter import export_ij_offer_to_pdf  # 5. Exportar PDFs
-from test_semantic_matching import (
-    extract_keywords,
-    get_keyword_overlap,
-    get_cv_embedding,
-    find_similar_jobs,
-    calculate_scores
-)
-from qdrant_config import get_qdrant_client
-from pymongo import MongoClient
-from dotenv import load_dotenv
-from job_resume_tailor import (
-    extract_keywords,
-    calculate_keyword_overlap,
-    generate_tailored_resume,
-    save_text_as_pdf,
-    get_all_chunks, # Reutilizamos esta función si es necesario
-    get_job_details_by_id
-)
 
-# Load environment variables
-load_dotenv()
-
-# --- Directorios ---
+# --- Configuracion de Directorios ---
 BASE_DIR = Path(__file__).parent
-TAILORED_CV_DIR = BASE_DIR / "uploads" / "tailored_cvs"
-TAILORED_CV_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR = BASE_DIR / "uploads"
+CV_DIR = UPLOADS_DIR / "cvs"
+JOBS_DIR = UPLOADS_DIR / "job_descriptions"
+TAILORED_CV_DIR = UPLOADS_DIR / "tailored_cvs"
+
+# Asegurarse de que los directorios existan
+CV_DIR.mkdir(exist_ok=True)
+JOBS_DIR.mkdir(exist_ok=True)
+TAILORED_CV_DIR.mkdir(exist_ok=True)
 
 def format_history_for_parser(history):
     # Convierte la lista de turnos a texto tipo diálogo
     return "\n".join([f"{role}: {msg}" for role, msg in history])
 
-
-def get_user_cv_text(qdrant_client, user_profile) -> dict:
-    """
-    Obtiene el texto del CV del usuario desde MongoDB y Qdrant.
-    
-    Args:
-        qdrant_client: Cliente de Qdrant para acceder a los vectores
-        
-    Returns:
-        dict: Diccionario con el texto del CV y el ID de Qdrant, o None si hay un error
-    """
-    try:
-        # Obtener el último CV del usuario desde MongoDB
-        load_dotenv()
-        mongo_uri = os.getenv("MONGODB_URI")
-        if not mongo_uri:
-            print("Error: MONGODB_URI no está configurado en el archivo .env")
-            return None
-            
-        mongo_client = MongoClient(mongo_uri)
-        db = mongo_client["offheadhunter_db"]
-        cv_collection = db["cv_uploads"]
-        
-        # Buscar el CV del actual usuario
-        latest_cv = cv_collection.find_one({"user_id": user_profile["user_id"]})
-        
-        if not latest_cv:
-            print("No se encontró ningún CV para el usuario.")
-            return None
-            
-        # Obtener el ID de Qdrant del documento del CV
-        # Usamos 'embedding_vector_id_qdrant' que es el campo que se usa al guardar el CV
-        qdrant_id = latest_cv.get('embedding_vector_id_qdrant')
-        if not qdrant_id:
-            print("No se encontró el ID de Qdrant en el documento del CV. Campos disponibles:", latest_cv.keys())
-            return None
-            
-        print(f"\n✅ CV encontrado en la base de datos con ID de Qdrant: {qdrant_id}")
-            
-        # Obtener el texto del CV desde Qdrant
-        result = qdrant_client.retrieve(
-            collection_name="cv_embeddings_BGE",
-            ids=[qdrant_id],
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        if not result or len(result) == 0:
-            print(f"No se encontró el CV con ID {qdrant_id} en Qdrant.")
-            return None
-            
-        # Get the uploaded_at timestamp from the CV document
-        uploaded_at = latest_cv.get('uploaded_at')
-        
-        # If it's a datetime object, convert to ISO format string
-        if hasattr(uploaded_at, 'isoformat'):
-            uploaded_at = uploaded_at.isoformat()
-            
-        # Return the CV text, Qdrant ID, and upload timestamp
-        return {
-            'text': result[0].payload.get('text', ''),
-            'qdrant_id': str(qdrant_id),
-            'uploaded_at': uploaded_at
-        }
-        
-    except Exception as e:
-        print(f"Error al obtener el CV del usuario: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 def main():
     print("=== PASO 1: Conversación con el chatbot ===")
@@ -129,217 +42,195 @@ def main():
         print(json.dumps(user_profile, indent=2, ensure_ascii=False))
     else:
         print("No se pudo extraer el perfil correctamente.")
-    # parser.save_profile()
     parser.upload_cv()
 
     print("\n=== PASO 3: Generando URL ===\n")
     url = generar_url_infojobs(user_profile["job_title"], user_profile["work_modality"], user_profile["salary_expectation"], user_profile["location"])
     print("URL generada:", url)
-
-    # Paso 4: Scraping de ofertas (guarda en MongoDB y devuelve la lista)
-    print("\n=== PASO 4: Scraping de ofertas ===\n")
-    job_offers = scrape_jobs(url)
-    max_offers = len(job_offers)
-    print(f"Ofertas extraídas: {max_offers}")
-
-    # Paso 5: Exportar PDFs de las ofertas
-    print("\n=== PASO 5: Exportando ofertas a PDF ===")
-
-    if max_offers == 0:
-        print("No hay ofertas para exportar.")
-    else:
-        while True:
-            try:
-                num_to_export = int(input(f"¿Cuántas ofertas quieres exportar a PDF? (1-{max_offers}): "))
-                if 1 <= num_to_export <= max_offers:
-                    break
-                else:
-                    print(f"Por favor, introduce un número entre 1 y {max_offers}.")
-            except ValueError:
-                print("Entrada no válida. Por favor, introduce un número.")
-
-        for offer in job_offers[:num_to_export]:
-            if offer.get("url"):
-                export_ij_offer_to_pdf(offer, user_profile)
-            else:
-                print("Oferta sin URL, se omite PDF.")
-
-    # Paso 6: Realizar matching semántico con las ofertas
-    print("\n=== PASO 6: Realizando matching semántico con ofertas ===")
     
-    try:
-        # Obtener el cliente de Qdrant
-        qdrant_client = get_qdrant_client()
-        
-        # Obtener el CV del usuario desde MongoDB y Qdrant
-        cv_data = get_user_cv_text(qdrant_client, user_profile)
-        
-        if not cv_data or 'text' not in cv_data:
-            print("No se pudo obtener el CV del usuario. Saliendo del paso de matching semántico.")
-            return
-            
-        cv_text = cv_data['text']
-        qdrant_id = cv_data.get('qdrant_id')
-        
-        if qdrant_id:
-            print(f"🔑 ID de Qdrant del CV: {qdrant_id}")
+    
+    # Paso 3: Scraping de ofertas (guarda en MongoDB y devuelve la lista)
+    job_offers = scrape_jobs(url)
+    print(f"Ofertas extraídas: {len(job_offers)}")
+
+    # Paso 4: Exportar PDFs de las ofertas y capturar nombres de archivos generados
+    new_job_files = []  # Lista para rastrear las ofertas recién scrapeadas
+    print(f"\nExportando {len(job_offers)} ofertas a PDF...")
+    
+    for i, offer in enumerate(job_offers, 1):
+        if offer.get("url"):
+            print(f"  [{i}/{len(job_offers)}] Exportando oferta: {offer.get('title', 'Sin título')[:50]}...")
+            # Capturar el nombre del archivo PDF generado
+            pdf_result = export_ij_offer_to_pdf(offer, output_dir=str(JOBS_DIR))
+            if pdf_result and pdf_result.get('success'):
+                new_job_files.append(pdf_result) 
+                pdf_name = Path(pdf_result['pdf_filename']).name
+                print(f"    ✅ PDF generado: {pdf_name}")
         else:
-            print("⚠️ No se pudo obtener el ID de Qdrant del CV")
+            print(f"  [{i}/{len(job_offers)}] ⚠️  Oferta sin URL, se omite PDF.")
+    
+    print(f"\n📊 Resumen: {len(new_job_files)} ofertas exportadas exitosamente")
+    if not new_job_files:
+        print("❌ No se generaron PDFs de ofertas. Abortando proceso.")
+        sys.exit(1)
+
+    # --- INICIO DE LA INTEGRACIÓN DEL NUEVO FLUJO ---
+    print("\n" + "="*60)
+    print("PASO 5: PROCESANDO DOCUMENTOS Y GENERANDO EMBEDDINGS")
+    print("="*60)
+
+    # El CV ya ha sido procesado y sus embeddings generados por JobSearchAgent.
+    cv_path = user_profile.get('cv_path')
+    if not (cv_path and Path(cv_path).exists()):
+        print("Error: El agente no pudo procesar o encontrar la ruta del CV. Abortando.")
+        sys.exit(1)
+
+    cv_id = Path(cv_path).stem
+    print(f"CV base para el matching: '{cv_id}'")
+
+    # Procesar SOLO las ofertas recién scrapeadas para generar sus embeddings
+    print(f"\n🔄 Procesando {len(new_job_files)} oferta(s) de trabajo nueva(s)...")
+    newly_processed_job_ids = []
+    for job_meta in new_job_files:
+        job_filename = job_meta.get('pdf_filename')
+        if not job_filename:
+            continue
+        job_path = JOBS_DIR / Path(job_filename).name
         
-        # Buscar ofertas similares al CV (solo las publicadas después de que se subió el CV)
-        print("\nBuscando ofertas similares a tu perfil...")
-        result = find_similar_jobs(
-            cv_text,
-            user_profile['user_id'], 
-            top_k=5,
-            cv_uploaded_at=cv_data.get('uploaded_at')
-        )
+        result = subprocess.run([
+            sys.executable, "process_documents.py", str(job_path),
+            '--document-type', 'job', '--collection', 'job_embeddings_BGE2'
+        ], check=True, capture_output=True, text=True)
         
-        # Mostrar advertencias si las hay
-        if result.get('warnings'):
-            for warning in result['warnings']:
-                print(f"Advertencia: {warning}")
-        
-        # Mostrar resultados
-        if not result.get('matches'):
-            print("No se encontraron ofertas similares a tu perfil.")
-        else:
-            print(f"\n=== OFERTAS RECOMENDADAS ({len(result['matches'])}) ===")
-            print(f"Origen de los datos: {'Búsqueda actual' if result.get('source') == 'current_search' else 'Datos históricos'}")
-            print("-" * 80)
-            
-            for i, job in enumerate(result['matches'], 1):
-                print(f"\n{i}. {job.get('title', 'Título no disponible').upper()}")
-                print(f"   {'-' * (len(str(i)) + 2 + len(job.get('title', 'Título no disponible')) + 2)}")
-                print(f"   Empresa: {job.get('company', 'No especificada')}")
-                
-                # Mostrar información de ubicación y salario si está disponible
-                metadata = job.get('metadata', {})
-                if metadata.get('locations'):
-                    print(f"   Ubicación: {metadata.get('locations')}")
-                if metadata.get('salary'):
-                    print(f"   Salario: {metadata.get('salary')}")
-                
-                # Mostrar puntuación de coincidencia (combinada o solo semántica)
-                score = job.get('combined_score', job.get('semantic_score', 0))
-                print(f"\n   Puntuación de coincidencia: {score*100:.1f}%")
-                
-                # Mostrar palabras clave coincidentes si están disponibles
-                if 'keyword_matches' in job and job['keyword_matches']:
-                    keywords = [match['keyword'] for match in job['keyword_matches'][:5]]
-                    print(f"   Palabras clave coincidentes: {', '.join(keywords)}")
-                
-                # Mostrar descripción si está disponible
-                if job.get('description'):
-                    print(f"\n   Resumen: {job.get('description')}")
-                
-                # Mostrar información adicional si está disponible
-                if metadata.get('source_url'):
-                    print(f"\n   📌 Más información: {metadata.get('source_url')}")
-                if metadata.get('scraped_at'):
-                    print(f"   📅 Publicada el: {metadata.get('scraped_at')}")
-                
-                print("\n" + "-" * 80)
-            
-            # --- PASO 7: ADAPTAR CV PARA UNA OFERTA (NUEVO) ---
-            print("\n=== PASO 7: Adaptar CV para una oferta ===")
-            
-            selected_index = -1
-            while True:
-                try:
-                    choice = input(f"Introduce el número de la oferta para la que quieres adaptar tu CV (1-{len(result['matches'])}), o 0 para omitir: ")
-                    selected_index = int(choice)
-                    
-                    if selected_index == 0:
-                        print("\nProceso de adaptación de CV omitido.")
-                        break
+        doc_id = None
+        for line in result.stdout.strip().split('\n'):
+            if line.startswith("PROCESSED_DOC_ID:"):
+                doc_id = line.split(":", 1)[1].strip()
+                break
+        if doc_id:
+            newly_processed_job_ids.append(doc_id)
+    
+    if not newly_processed_job_ids:
+        print("❌ No se pudo procesar ninguna de las nuevas ofertas. Abortando.")
+        sys.exit(1)
 
-                    if 1 <= selected_index <= len(result['matches']):
-                        # Obtener la oferta y los IDs necesarios
-                        selected_job = result['matches'][selected_index - 1]
-                        cv_id = cv_data.get('qdrant_id')
-                        job_id = selected_job.get('job_id') # CORRECCIÓN: Usar 'job_id' en lugar de 'id'
+    print(f"\n✅ Procesamiento completado: {len(newly_processed_job_ids)} ofertas listas para matching")
 
-                        if not job_id:
-                            print("Error: La oferta seleccionada no tiene un ID válido.")
-                            break
+    print("\n" + "="*60)
+    print("PASO 6: REALIZANDO MATCHING DE CV CON OFERTAS RECIÉN SCRAPEADAS")
+    print("="*60)
+    print(f"🎯 Matching SOLO contra las {len(newly_processed_job_ids)} ofertas recién scrapeadas")
+    print("📋 Ofertas objetivo:")
+    for i, job_id in enumerate(newly_processed_job_ids, 1):
+        print(f"  {i}. {job_id}")
 
-                        print(f"\nAdaptando CV '{cv_id}' para la oferta '{job_id}'...")
+    cv_id = Path(cv_path).stem
+    # Construir comando con los job IDs específicos
+    matching_cmd = [
+        sys.executable, "job_matching.py",
+        "--cv_id", cv_id,
+        "--top_k", str(len(newly_processed_job_ids)),  # Mostrar todas las ofertas nuevas
+        "--job_ids"
+    ] + newly_processed_job_ids  # Añadir los job IDs específicos
+    
+    print(f"\n🔍 Ejecutando matching con comando: {' '.join(matching_cmd[-6:])}...")  # Mostrar últimos argumentos
+    result = subprocess.run(matching_cmd, capture_output=True, text=True, check=True)
 
-                        # 1. Obtener textos completos de Qdrant
-                        cv_full_text = cv_data.get('text')
-                        # Asegúrate de que la colección de jobs es la correcta
-                        job_chunks = get_all_chunks(qdrant_client, "job_embeddings_BGE", job_id)
-                        job_full_text = '\n'.join([c.payload['text'] for c in job_chunks])
+    matching_results = json.loads(result.stdout.strip())
 
-                        # 2. Analizar palabras clave
-                        cv_keywords = extract_keywords(cv_full_text)
-                        job_keywords = extract_keywords(job_full_text)
-                        matching_keys, missing_keys = calculate_keyword_overlap(cv_keywords, job_keywords)
+    if not matching_results:
+        print("No se encontraron ofertas de trabajo coincidentes.")
+        sys.exit(0)
 
-                        # 3. Generar CV adaptado con IA
-                        print("\n🤖 Llamando a la IA para generar el nuevo CV... (esto puede tardar un momento)")
-                        tailored_resume_text = generate_tailored_resume(
-                            cv_full_text, 
-                            job_full_text, 
-                            matching_keys, 
-                            missing_keys
-                        )
+    print("\n--- Mejores Ofertas Encontradas ---")
+    for i, res in enumerate(matching_results):
+        print(f"{i + 1}. Job ID: {res['job_id']}, Score: {res['score']:.4f}")
 
-                        # 4. Guardar el resultado como PDF
-                        output_filename = f"CV_{cv_id}_adaptado_para_{job_id}.pdf"
-                        output_path = TAILORED_CV_DIR / output_filename
-                        save_text_as_pdf(tailored_resume_text, output_path)
-                        
-                        print("\n--- Proceso de Adaptación Finalizado ---")
-                        print(f"\n✅ ¡Éxito! El CV adaptado ha sido guardado en: {output_path}")
-                        break # Salir del bucle while
-                    else:
-                        print(f"Selección inválida. Por favor, introduce un número entre 1 y {len(result['matches'])}.")
-                except ValueError:
-                    print("Entrada no válida. Por favor, introduce un número.")
-                except Exception as e:
-                    print(f"Ocurrió un error durante la adaptación: {e}")
-                    break
+    print("\n" + "="*60)
+    print("PASO 7: SELECCIONE UNA OFERTA PARA ADAPTAR SU CV")
+    print("="*60)
 
-            # --- PASO 8: RECALCULAR Y COMPARAR MATCHING SCORE ---
-            print("\n--- PASO 8: COMPARANDO MEJORA DEL MATCHING ---")
-            job_full_text = get_job_details_by_id(job_id)
+    selected_index = -1
+    while selected_index < 0 or selected_index >= len(matching_results):
+        try:
+            choice = input(f"Introduzca el número de la oferta (1-{len(matching_results)}): ")
+            selected_index = int(choice) - 1
+            if not (0 <= selected_index < len(matching_results)):
+                print("Selección inválida. Inténtelo de nuevo.")
+        except ValueError:
+            print("Por favor, introduzca un número válido.")
 
-            if job_full_text:
-                # Calcular la nueva puntuación con el CV adaptado
-                new_scores = calculate_scores(tailored_resume_text, job_full_text)
-                new_combined_score = new_scores.get('combined_score', 0)
+    # Extraer el job_id y el score del resultado seleccionado
+    selected_match = matching_results[selected_index]
+    selected_job_id = selected_match['job_id']
+    initial_score = selected_match['score']
 
-                # Obtener la puntuación original de la oferta seleccionada
-                original_score = selected_job.get('combined_score', 0)
+    print("\n" + "="*60)
+    print(f"PASO 8: ADAPTANDO CV PARA LA OFERTA '{selected_job_id}'")
+    print(f"(Puntuación inicial: {initial_score:.4f})")
+    print("="*60)
 
-                # Calcular la mejora
-                improvement = new_combined_score - original_score
-                improvement_percent = (improvement / original_score * 100) if original_score > 0 else 0
+    tailor_result = subprocess.run([
+        sys.executable, "job_resume_tailor.py",
+        "--cv_id", cv_id,
+        "--job_id", selected_job_id,
+        "--output_dir", str(TAILORED_CV_DIR),
+        "--initial_score", str(initial_score) # Pasar el score inicial
+    ], check=True, capture_output=True, text=True)
 
-                # Mostrar la comparación
-                print("\n" + "="*25 + " ANÁLISIS DE MEJORA " + "="*25)
-                print(f"Puntuación Original:          {original_score*100:.1f}%")
-                print(f"Puntuación con CV Adaptado:   {new_combined_score*100:.1f}%")
-                print("-" * 68)
-                if improvement > 0:
-                    print(f"¡Mejora de {improvement*100:.1f} puntos porcentuales! (+{improvement_percent:.1f}%)")
-                elif improvement < 0:
-                    print(f"La puntuación ha disminuido en {abs(improvement)*100:.1f} puntos.")
-                else:
-                    print("La puntuación no ha cambiado.")
-                print("=" * 68 + "\n")
-            else:
-                print("No se pudo obtener el texto completo de la oferta para recalcular la puntuación.")
+    # Extraer la ruta del CV adaptado de la salida del script
+    tailored_cv_path_str = ""
+    for line in tailor_result.stdout.strip().split('\n'):
+        if line.startswith("TAILORED_CV_PATH:"):
+            tailored_cv_path_str = line.split(":", 1)[1].strip()
+            break
+    
+    if not tailored_cv_path_str:
+        print("Error: No se pudo encontrar la ruta del CV adaptado en la salida del script.")
+        sys.exit(1)
 
-        # else:
-        #     print("No se pudo generar el CV adaptado, por lo que no se puede comparar la puntuación.")
+    tailored_cv_path = Path(tailored_cv_path_str)
+    print(f"\nEl CV adaptado ha sido generado en: {tailored_cv_path}")
 
-    except Exception as e:
-        print(f"\nError al realizar el matching semántico: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    # --- PASO 9: RE-EVALUAR EL MATCHING CON EL CV ADAPTADO ---
+    print("\n" + "="*60)
+    print("PASO 9: RE-EVALUAR EL MATCHING CON EL CV ADAPTADO")
+    print("="*60)
+
+    # 1. Procesar el CV adaptado para generar sus embeddings
+    print(f"\nProcesando el CV adaptado en: {tailored_cv_path}...")
+    subprocess.run([
+        sys.executable, "process_documents.py",
+        str(tailored_cv_path),
+        '--document-type', 'cv',
+        '--collection', 'cv_embeddings_BGE2'  # Usar la misma colección
+    ], check=True)
+
+    # 2. Re-ejecutar el matching con el ID del nuevo CV
+    tailored_cv_id = tailored_cv_path.stem
+    print(f"\nRe-ejecutando matching para el CV adaptado ('{tailored_cv_id}') y la oferta ('{selected_job_id}')...")
+    rematch_cmd = [
+        sys.executable, "job_matching.py",
+        "--cv_id", tailored_cv_id,
+        "--job_ids", selected_job_id  # Solo contra la oferta seleccionada
+    ]
+    rematch_result = subprocess.run(rematch_cmd, capture_output=True, text=True, check=True)
+    rematch_data = json.loads(rematch_result.stdout.strip())
+
+    # 3. Mostrar comparación de scores
+    original_score = matching_results[selected_index]['score']
+    new_score = rematch_data[0]['score'] if rematch_data else 0
+
+    print("\n--- Comparación de Puntuaciones de Matching ---")
+    print(f"Oferta: {selected_job_id}")
+    print(f"Puntuación del CV Original: {original_score:.4f}")
+    print(f"Puntuación del CV Adaptado:  {new_score:.4f}")
+    if new_score > original_score:
+        print(f"🎉 ¡Mejora de {(new_score - original_score):.4f} puntos!")
+    else:
+        print("El score no ha mejorado. Puede que la oferta ya fuera un buen match.")
+
+    print("\n¡Proceso completado!")
 
 if __name__ == "__main__":
     main()

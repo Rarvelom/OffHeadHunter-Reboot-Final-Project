@@ -1,17 +1,16 @@
 import os
-import json
-import uuid
 import re
-from datetime import datetime, timezone, timedelta
-from src.utils.time_utils import get_current_utc_timestamp
-from typing import Dict, List, Optional, Any, Union
+import json
 from dotenv import load_dotenv
+import google.generativeai as genai
 from pymongo import MongoClient
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient, models
 from unstructured.partition.auto import partition
 from bson.binary import Binary
-import google.generativeai as genai
+import uuid
+from datetime import datetime
 
 SYSTEM_PROMPT = """
 Eres un agente de análisis de conversaciones para OffHeadHunter.
@@ -157,10 +156,16 @@ class JobSearchAgent:
     def save_profile(self):
         if self.user_profile:
             self.user_profile["user_id"] = self.user_id
-            self.profiles_collection.insert_one(self.user_profile)
-            print("Perfil guardado en MongoDB.")
-        else:
-            print("No hay perfil para guardar.")
+            try:
+                # Usar update_one con upsert=True para insertar si no existe o actualizar si ya existe.
+                self.profiles_collection.update_one(
+                    {"user_id": self.user_profile["user_id"]},
+                    {"$set": self.user_profile},
+                    upsert=True
+                )
+                print("Perfil guardado/actualizado en MongoDB.")
+            except Exception as e:
+                print(f"Error al guardar el perfil en MongoDB: {e}")
 
     def load_profile(self):
         profile = self.profiles_collection.find_one({"user_id": self.user_id})
@@ -195,10 +200,9 @@ class JobSearchAgent:
             # Extract text from file
             cv_id = str(uuid.uuid4())
             filename = os.path.basename(cv_path)
-            # uploaded_at = datetime.utcnow().isoformat() # Método original de la refactorización de este archivo, sustituimos su uso por la función "get_current_utc_timestamp()"
-            
+            uploaded_at = datetime.utcnow().isoformat()
 
-            elements = partition(cv_path, languages=["es"])
+            elements = partition(cv_path)
             cv_text = "\n".join([str(el) for el in elements])
 
             ##### ESTRUCTURA SIMPLE, LA REEMPLAZAMOS POR LA UTILIZADA EN "job_search_agent.py"
@@ -217,7 +221,7 @@ class JobSearchAgent:
                 'original_text': cv_text,
                 'version': 1,  # Version inicial
                 'vectorized': False,  # Will be updated after Qdrant save
-                'uploaded_at': get_current_utc_timestamp(),
+                'uploaded_at': uploaded_at,
                 'status': 'pending',
                 'file_binary': Binary(cv_data),  # Binario original del CV (PDF o DOCX)
                 'metadata': {
@@ -236,7 +240,6 @@ class JobSearchAgent:
                 else:
                     try:
                         embedding = self.embedding_model.encode(cv_text).tolist()
-
                         # Guardar en Qdrant
                         self.qdrant_client.upsert(
                             collection_name="cv_embeddings_BGE",
@@ -248,8 +251,7 @@ class JobSearchAgent:
                                         "mongodb_id": "",  # Se actualizará tras guardar en MongoDB
                                         "filename": filename,
                                         "text": cv_text,
-                                        "uploaded_at": get_current_utc_timestamp(),
-                                        'user_id': self.user_id
+                                        "uploaded_at": uploaded_at
                                     }
                                 )
                             ],
@@ -268,10 +270,6 @@ class JobSearchAgent:
                 cv_record['status'] = 'error'
                 cv_record['error'] = 'Qdrant client not available'
 
-            print(cv_record['filename']) # BORRAR!!! SOLO PARA TESTEOS Y COMPROBAR QUÉ CAMPOS SE REGISTRAN INICIALMENTE
-            print(cv_record['file_url']) # BORRAR!!! SOLO PARA TESTEOS Y COMPROBAR QUÉ CAMPOS SE REGISTRAN INICIALMENTE
-            print(cv_record['uploaded_at']) # BORRAR!!! SOLO PARA TESTEOS Y COMPROBAR QUÉ CAMPOS SE REGISTRAN INICIALMENTE
-
             # 2. Guardar en MongoDB
             result = self.cv_uploads.insert_one(cv_record)
 
@@ -288,10 +286,8 @@ class JobSearchAgent:
 
             print("CV subido y guardado en la base de datos.")
 
-            # Guardar la ruta del CV en el perfil del usuario
             self.user_profile['cv_path'] = cv_path
             self.save_profile() # Guardar el perfil actualizado en la base de datos
-
             print(self.user_profile)
 
             break
@@ -315,7 +311,7 @@ def main():
             profile = json.loads(json_str)
             print("\nPerfil extraído:")
             print(json.dumps(profile, indent=2, ensure_ascii=False))
-            # agent.save_profile()
+            agent.save_profile()
         except Exception as e:
             print("No se pudo parsear el JSON extraído:", e)
             print("Respuesta completa del modelo:\n", response.text)
