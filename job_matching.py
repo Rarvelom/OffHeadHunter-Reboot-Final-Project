@@ -162,7 +162,8 @@ def main(args_list=None):
     parser.add_argument('--cv_collection', type=str, default="cv_embeddings_BGE2", help='Qdrant collection for CVs.')
     parser.add_argument('--job_collection', type=str, default="job_embeddings_BGE2", help='Qdrant collection for jobs.')
     parser.add_argument('--top_k', type=int, default=5, help='Number of top job matches to return.')
-    parser.add_argument('--job_ids', type=str, nargs='*', help='Optional: Specific job IDs to match against (if not provided, matches against all jobs)')
+    # Se espera que los IDs vengan como un solo string separado por comas
+    parser.add_argument('--job_ids', type=str, help='Optional: Comma-separated string of specific job IDs to match against')
     args = parser.parse_args(args_list)
 
     try:
@@ -202,10 +203,16 @@ def main(args_list=None):
         print("[]")
         return
 
-    matches = match_cv_to_jobs(client, args.cv_id, args.cv_collection, args.job_collection, args.job_ids)
+    # Parse the job_ids string into a list
+    specific_job_ids = []
+    if args.job_ids:
+        specific_job_ids = [job_id.strip() for job_id in args.job_ids.split(',')]
+
+    matches = match_cv_to_jobs(client, args.cv_id, args.cv_collection, args.job_collection, specific_job_ids)
 
     import json
-    print(json.dumps(matches))
+    # Devolver solo los top_k resultados
+    print(json.dumps(matches[:args.top_k]))
 
 if __name__ == "__main__":
     main()

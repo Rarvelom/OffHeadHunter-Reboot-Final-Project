@@ -17,7 +17,7 @@ from src.qdrant_storage import QdrantStorage
 # Load environment variables
 load_dotenv()
 
-def process_pdf_file(
+def process_document_file(
     file_path: Union[str, Path],
     collection_name: str = "cv_embeddings",
     user_id: str = None,
@@ -25,7 +25,9 @@ def process_pdf_file(
     chunk_size: int = None,
     chunk_overlap: int = None,
     batch_size: int = 32,
-    source: str = "cv_upload"
+    source: str = "cv_upload",
+    text_processor: Optional[TextProcessor] = None,
+    storage: Optional[QdrantStorage] = None
 ) -> Dict[str, Any]:
     """
     Process a PDF file (CV or job posting) and store its embeddings in MongoDB and Qdrant.
@@ -39,6 +41,8 @@ def process_pdf_file(
         chunk_overlap: Number of overlapping tokens between chunks.
         batch_size: Batch size for processing embeddings.
         source: Source of the documents (e.g., 'cv_upload', 'job_posting').
+        text_processor: Optional pre-initialized TextProcessor instance.
+        storage: Optional pre-initialized QdrantStorage instance.
         
     Returns:
         Dictionary with processing information.
@@ -47,31 +51,44 @@ def process_pdf_file(
     if not file_path.exists():
         return {"success": False, "error": f"File {file_path} does not exist."}
     
-    if file_path.suffix.lower() != '.pdf':
-        return {"success": False, "error": f"File {file_path} is not a PDF."}
+    allowed_extensions = ['.pdf', '.md']
+    if file_path.suffix.lower() not in allowed_extensions:
+        return {"success": False, "error": f"File {file_path} is not a supported format (PDF or Markdown)."}
     
     try:
-        # Initialize processors and storage
-        text_processor = TextProcessor()
-        pdf_processor = PDFProcessor(extract_metadata=True)
-        storage = QdrantStorage(collection_name=collection_name)
+        # Initialize processors and storage if not provided
+        if text_processor is None:
+            print("Initializing new TextProcessor...")
+            text_processor = TextProcessor()
+        
+        if storage is None or storage.collection_name != collection_name:
+            print(f"Initializing new QdrantStorage for collection '{collection_name}'...")
+            storage = QdrantStorage(collection_name=collection_name)
 
-        # Process the PDF file
-        print(f"Processing PDF: {file_path.name}")
-        pdf_data = pdf_processor.process_pdf(file_path)
+        text = ""
+        document_metadata = {}
 
-        # Extract text and metadata
-        text = pdf_data.get('text', '').strip()
+        if file_path.suffix.lower() == '.pdf':
+            print(f"Processing PDF: {file_path.name}")
+            pdf_processor = PDFProcessor(extract_metadata=True)
+            pdf_data = pdf_processor.process_pdf(file_path)
+            text = pdf_data.get('text', '').strip()
+            document_metadata = pdf_data.get('metadata', {})
+            document_metadata['num_pages'] = pdf_data.get('num_pages', 0)
+        
+        elif file_path.suffix.lower() == '.md':
+            print(f"Processing Markdown: {file_path.name}")
+            text = file_path.read_text(encoding='utf-8')
+            document_metadata['num_pages'] = 1 # Markdown is treated as a single page
+
         if not text:
             return {"success": False, "error": f"No text could be extracted from {file_path}"}
 
-        # Get metadata from PDF or use defaults
-        document_metadata = pdf_data.get('metadata', {})
+        # Common metadata
         document_metadata.update({
             'file_name': file_path.name,
             'file_path': str(file_path),
             'document_type': document_type,
-            'num_pages': pdf_data.get('num_pages', 0),
             'source': source
         })
 
@@ -173,6 +190,15 @@ def process_pdf_directory(
     if not directory.is_dir():
         return {"success": False, "error": f"Directory {directory} does not exist."}
     
+    # Initialize processors and storage if not provided
+    text_processor = kwargs.get('text_processor')
+    if text_processor is None:
+        text_processor = TextProcessor()
+
+    storage = kwargs.get('storage')
+    if storage is None or storage.collection_name != collection_name:
+        storage = QdrantStorage(collection_name=collection_name)
+
     # Find all PDF files
     pattern = "**/*.pdf" if recursive else "*.pdf"
     pdf_files = list(directory.glob(pattern))
@@ -188,11 +214,14 @@ def process_pdf_directory(
     for i, pdf_file in enumerate(pdf_files, 1):
         print(f"\nProcessing file {i}/{len(pdf_files)}: {pdf_file.name}")
         
-        result = process_pdf_file(
+        result = process_document_file(
             file_path=pdf_file,
             collection_name=collection_name,
             user_id=user_id,
             document_type=document_type,
+            source=f"directory_scan_{directory.name}",
+            text_processor=text_processor, # Pass instances
+            storage=storage, # Pass instances
             **kwargs
         )
         
@@ -274,12 +303,16 @@ def main():
     print(f"Batch size: {args.batch_size}")
     print("="*70 + "\n")
     
+    # Initialize processors once for efficiency
+    text_processor = TextProcessor()
+
     # Determine if input is a file or directory
     input_path = Path(args.path)
     
-    if input_path.is_file() and input_path.suffix.lower() == '.pdf':
-        # Process a single PDF file
-        result = process_pdf_file(
+    if input_path.is_file() and input_path.suffix.lower() in ['.pdf', '.md']:
+        # Process a single document file (PDF or MD)
+        storage = QdrantStorage(collection_name=args.collection)
+        result = process_document_file(
             file_path=input_path,
             collection_name=args.collection,
             user_id=args.user_id,
@@ -287,10 +320,13 @@ def main():
             chunk_size=args.chunk_size,
             chunk_overlap=args.overlap,
             batch_size=args.batch_size,
-            source=args.source
+            source=args.source,
+            text_processor=text_processor,
+            storage=storage
         )
     elif input_path.is_dir():
         # Process a directory of PDFs
+        storage = QdrantStorage(collection_name=args.collection)
         result = process_pdf_directory(
             directory=input_path,
             collection_name=args.collection,
@@ -300,7 +336,9 @@ def main():
             chunk_size=args.chunk_size,
             chunk_overlap=args.overlap,
             batch_size=args.batch_size,
-            source=args.source
+            source=args.source,
+            text_processor=text_processor,
+            storage=storage
         )
     else:
         print(f"Error: {input_path} is not a valid PDF file or directory")

@@ -104,9 +104,8 @@ class TextProcessor:
                 doc = Document(file_path)
                 return "\n".join([paragraph.text for paragraph in doc.paragraphs])
                 
-            elif extension == '.txt':
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    return f.read()
+            elif extension in ['.txt', '.md']:
+                return file_path.read_text(encoding='utf-8')
                     
             else:
                 raise ValueError(f"Formato de archivo no soportado: {extension}")

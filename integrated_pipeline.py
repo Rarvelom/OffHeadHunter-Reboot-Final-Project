@@ -8,8 +8,13 @@ from job_search_agent import JobSearchAgent
 from src.url_gen import generar_url_infojobs
 from src.ij_jobs_scraper import scrape_jobs
 from src.ij_pdf_exporter import export_ij_offer_to_pdf
-
-
+from process_documents import process_document_file
+from src.text_processing import TextProcessor
+from src.qdrant_storage import QdrantStorage
+from job_matching import match_cv_to_jobs, get_qdrant_client
+from job_resume_tailor import run_resume_tailoring
+from qdrant_config import get_qdrant_client
+import concurrent.futures
 
 # --- Configuracion de Directorios ---
 BASE_DIR = Path(__file__).parent
@@ -27,6 +32,49 @@ def format_history_for_parser(history):
     # Convierte la lista de turnos a texto tipo diálogo
     return "\n".join([f"{role}: {msg}" for role, msg in history])
 
+def select_jobs_interactively(job_offers: list) -> list:
+    """Muestra una lista de ofertas y pide al usuario que seleccione cuáles procesar."""
+    print("\n--- Selección de Ofertas de Trabajo ---")
+    if not job_offers:
+        print("No se encontraron ofertas.")
+        return []
+
+    for i, offer in enumerate(job_offers):
+        title = offer.get('title', 'Sin título')
+        company = offer.get('company', 'Empresa no especificada')
+        print(f"[{i + 1:2d}] {title[:70]:<70} | {company}")
+
+    print("\nSeleccione las ofertas que desea procesar.")
+    print("Puede seleccionar varias separadas por comas (ej: 1, 3, 5) o un rango (ej: 1-5).")
+    print("Presione Enter para seleccionar todas las ofertas.")
+
+    selected_offers = []
+    while True:
+        try:
+            raw_input = input(f"Seleccione (1-{len(job_offers)}): ")
+            if not raw_input:
+                return job_offers
+
+            selected_indices = set()
+            parts = raw_input.split(',')
+            for part in parts:
+                part = part.strip()
+                if '-' in part:
+                    start, end = map(int, part.split('-'))
+                    selected_indices.update(range(start - 1, end))
+                else:
+                    selected_indices.add(int(part) - 1)
+            
+            if all(0 <= i < len(job_offers) for i in selected_indices):
+                selected_offers = [job_offers[i] for i in sorted(list(selected_indices))]
+                print(f"\n✅ {len(selected_offers)} ofertas seleccionadas.")
+                break
+            else:
+                print("Selección inválida. Asegúrese de que todos los números están en el rango.")
+        except (ValueError, IndexError):
+            print("Entrada inválida. Por favor, introduzca números o rangos válidos.")
+            
+    return selected_offers
 
 def main():
     print("=== PASO 1: Conversación con el chatbot ===")
@@ -53,25 +101,37 @@ def main():
     job_offers = scrape_jobs(url)
     print(f"Ofertas extraídas: {len(job_offers)}")
 
-    # Paso 4: Exportar PDFs de las ofertas y capturar nombres de archivos generados
-    new_job_files = []  # Lista para rastrear las ofertas recién scrapeadas
-    print(f"\nExportando {len(job_offers)} ofertas a PDF...")
-    
-    for i, offer in enumerate(job_offers, 1):
-        if offer.get("url"):
-            print(f"  [{i}/{len(job_offers)}] Exportando oferta: {offer.get('title', 'Sin título')[:50]}...")
-            # Capturar el nombre del archivo PDF generado
-            pdf_result = export_ij_offer_to_pdf(offer, output_dir=str(JOBS_DIR))
-            if pdf_result and pdf_result.get('success'):
-                new_job_files.append(pdf_result) 
-                pdf_name = Path(pdf_result['pdf_filename']).name
-                print(f"    ✅ PDF generado: {pdf_name}")
-        else:
-            print(f"  [{i}/{len(job_offers)}] ⚠️  Oferta sin URL, se omite PDF.")
-    
-    print(f"\n📊 Resumen: {len(new_job_files)} ofertas exportadas exitosamente")
+    # PASO 3.5: Selección interactiva de ofertas
+    selected_jobs = select_jobs_interactively(job_offers)
+
+    if not selected_jobs:
+        print("No se seleccionaron ofertas. Finalizando el proceso.")
+        sys.exit(0)
+
+    # --- PASO 4: Exportar ofertas seleccionadas a PDF ---
+    print(f"\n--- Exportando {len(selected_jobs)} ofertas seleccionadas a PDF ---")
+    new_job_files = []
+    for offer in selected_jobs:
+        try:
+            export_result = export_ij_offer_to_pdf(offer, JOBS_DIR)
+            # Comprobar si la exportación fue exitosa y si el resultado es un diccionario
+            if export_result and isinstance(export_result, dict) and export_result.get('success'):
+                pdf_filename = export_result.get('pdf_filename')
+                if pdf_filename:
+                    # Guardamos la metadata que puede ser útil después
+                    new_job_files.append({
+                        'offer_id': offer.get('id'),
+                        'title': offer.get('title'),
+                        'pdf_filename': pdf_filename
+                    })
+                    print(f"  -> Exportado: {pdf_filename}")
+            else:
+                 print(f"  -> Error exportando oferta {offer.get('id', 'N/A')}: No se recibió un resultado válido.")
+        except Exception as e:
+            print(f"  -> Error exportando oferta {offer.get('id', 'N/A')}: {e}")
+
     if not new_job_files:
-        print("❌ No se generaron PDFs de ofertas. Abortando proceso.")
+        print("No se pudo exportar ninguna oferta a PDF. Abortando.")
         sys.exit(1)
 
     # --- INICIO DE LA INTEGRACIÓN DEL NUEVO FLUJO ---
@@ -88,27 +148,46 @@ def main():
     cv_id = Path(cv_path).stem
     print(f"CV base para el matching: '{cv_id}'")
 
+    # Inicializar el TextProcessor una sola vez para reutilizar el modelo de embeddings
+    print("\nInitializing TextProcessor (this may take a moment)...")
+    text_processor = TextProcessor()
+    print("TextProcessor initialized.")
+
     # Procesar SOLO las ofertas recién scrapeadas para generar sus embeddings
-    print(f"\n🔄 Procesando {len(new_job_files)} oferta(s) de trabajo nueva(s)...")
+    print(f"\n🔄 Procesando {len(new_job_files)} oferta(s) de trabajo nueva(s) en paralelo...")
     newly_processed_job_ids = []
-    for job_meta in new_job_files:
+    job_storage = QdrantStorage(collection_name='job_embeddings_BGE2') # Instancia única para todas las ofertas
+
+    # Wrapper para poder usarlo con ThreadPoolExecutor
+    def process_job_file_wrapper(job_meta):
         job_filename = job_meta.get('pdf_filename')
         if not job_filename:
-            continue
+            return None
         job_path = JOBS_DIR / Path(job_filename).name
         
-        result = subprocess.run([
-            sys.executable, "process_documents.py", str(job_path),
-            '--document-type', 'job', '--collection', 'job_embeddings_BGE2'
-        ], check=True, capture_output=True, text=True)
-        
-        doc_id = None
-        for line in result.stdout.strip().split('\n'):
-            if line.startswith("PROCESSED_DOC_ID:"):
-                doc_id = line.split(":", 1)[1].strip()
-                break
-        if doc_id:
-            newly_processed_job_ids.append(doc_id)
+        result = process_document_file(
+            file_path=job_path,
+            collection_name='job_embeddings_BGE2',
+            document_type='job',
+            text_processor=text_processor,
+            storage=job_storage
+        )
+
+        if result.get("success"):
+            doc_id = Path(result.get('file_name', '')).stem
+            if doc_id:
+                return doc_id
+        else:
+            print(f"⚠️  Error processing {job_path.name}: {result.get('error')}")
+        return None
+
+    # Usar ThreadPoolExecutor para procesar en paralelo
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_job = {executor.submit(process_job_file_wrapper, job_meta): job_meta for job_meta in new_job_files}
+        for future in concurrent.futures.as_completed(future_to_job):
+            doc_id = future.result()
+            if doc_id:
+                newly_processed_job_ids.append(doc_id)
     
     if not newly_processed_job_ids:
         print("❌ No se pudo procesar ninguna de las nuevas ofertas. Abortando.")
@@ -125,18 +204,21 @@ def main():
         print(f"  {i}. {job_id}")
 
     cv_id = Path(cv_path).stem
-    # Construir comando con los job IDs específicos
-    matching_cmd = [
-        sys.executable, "job_matching.py",
-        "--cv_id", cv_id,
-        "--top_k", str(len(newly_processed_job_ids)),  # Mostrar todas las ofertas nuevas
-        "--job_ids"
-    ] + newly_processed_job_ids  # Añadir los job IDs específicos
     
-    print(f"\n🔍 Ejecutando matching con comando: {' '.join(matching_cmd[-6:])}...")  # Mostrar últimos argumentos
-    result = subprocess.run(matching_cmd, capture_output=True, text=True, check=True)
+    # Llamada directa a la función de matching
+    print("\n🔍 Ejecutando matching...")
+    qdrant_client = get_qdrant_client() # Obtener cliente Qdrant
+    matching_results = match_cv_to_jobs(
+        client=qdrant_client,
+        cv_id=cv_id,
+        cv_collection="cv_embeddings_BGE2",
+        job_collection="job_embeddings_BGE2",
+        specific_job_ids=newly_processed_job_ids
+    )
 
-    matching_results = json.loads(result.stdout.strip())
+    # Limitar los resultados a top_k si es necesario (la función devuelve todos los resultados ordenados)
+    top_k = len(newly_processed_job_ids)
+    matching_results = matching_results[:top_k]
 
     if not matching_results:
         print("No se encontraron ofertas de trabajo coincidentes.")
@@ -170,65 +252,68 @@ def main():
     print(f"(Puntuación inicial: {initial_score:.4f})")
     print("="*60)
 
-    tailor_result = subprocess.run([
-        sys.executable, "job_resume_tailor.py",
-        "--cv_id", cv_id,
-        "--job_id", selected_job_id,
-        "--output_dir", str(TAILORED_CV_DIR),
-        "--initial_score", str(initial_score) # Pasar el score inicial
-    ], check=True, capture_output=True, text=True)
-
-    # Extraer la ruta del CV adaptado de la salida del script
-    tailored_cv_path_str = ""
-    for line in tailor_result.stdout.strip().split('\n'):
-        if line.startswith("TAILORED_CV_PATH:"):
-            tailored_cv_path_str = line.split(":", 1)[1].strip()
-            break
-    
-    if not tailored_cv_path_str:
-        print("Error: No se pudo encontrar la ruta del CV adaptado en la salida del script.")
+    try:
+        tailored_cv_path = run_resume_tailoring(
+            cv_id=cv_id,
+            job_id=selected_job_id,
+            initial_score=initial_score,
+            output_dir=str(TAILORED_CV_DIR),
+            client=qdrant_client # Reutilizar el cliente Qdrant
+        )
+    except Exception as e:
+        print(f"\n❌ Error durante la adaptación del CV: {e}")
         sys.exit(1)
 
-    tailored_cv_path = Path(tailored_cv_path_str)
-    print(f"\nEl CV adaptado ha sido generado en: {tailored_cv_path}")
+    # --- PASO 9: Procesar el nuevo CV adaptado --- 
+    print(f"\n🔄 Procesando el CV adaptado: {tailored_cv_path.name}")
+    
+    # Llamada directa a la función de procesamiento
+    cv_storage = QdrantStorage(collection_name='cv_embeddings_BGE2')
+    result = process_document_file(
+        file_path=tailored_cv_path,
+        collection_name='cv_embeddings_BGE2',
+        document_type='cv',
+        text_processor=text_processor,  # Reutilizar la instancia de TextProcessor
+        storage=cv_storage 
+    )
 
-    # --- PASO 9: RE-EVALUAR EL MATCHING CON EL CV ADAPTADO ---
-    print("\n" + "="*60)
-    print("PASO 9: RE-EVALUAR EL MATCHING CON EL CV ADAPTADO")
-    print("="*60)
+    if not result.get("success"):
+        print(f"❌ Error al procesar el CV adaptado: {result.get('error')}")
+        sys.exit(1)
 
-    # 1. Procesar el CV adaptado para generar sus embeddings
-    print(f"\nProcesando el CV adaptado en: {tailored_cv_path}...")
-    subprocess.run([
-        sys.executable, "process_documents.py",
-        str(tailored_cv_path),
-        '--document-type', 'cv',
-        '--collection', 'cv_embeddings_BGE2'  # Usar la misma colección
-    ], check=True)
+    tailored_cv_id = Path(result.get('file_name', '')).stem
+    print(f"✅ CV adaptado procesado. Nuevo ID: '{tailored_cv_id}'")
 
-    # 2. Re-ejecutar el matching con el ID del nuevo CV
-    tailored_cv_id = tailored_cv_path.stem
-    print(f"\nRe-ejecutando matching para el CV adaptado ('{tailored_cv_id}') y la oferta ('{selected_job_id}')...")
-    rematch_cmd = [
-        sys.executable, "job_matching.py",
-        "--cv_id", tailored_cv_id,
-        "--job_ids", selected_job_id  # Solo contra la oferta seleccionada
-    ]
-    rematch_result = subprocess.run(rematch_cmd, capture_output=True, text=True, check=True)
-    rematch_data = json.loads(rematch_result.stdout.strip())
 
-    # 3. Mostrar comparación de scores
-    original_score = matching_results[selected_index]['score']
-    new_score = rematch_data[0]['score'] if rematch_data else 0
+    # --- PASO 10: Re-matching y comparación --- 
+    # Llamada directa a la función de matching para el re-matching
+    print("\n🔍 Ejecutando re-matching con el CV adaptado...")
+    rematch_data = match_cv_to_jobs(
+        client=qdrant_client,
+        cv_id=tailored_cv_id,
+        cv_collection="cv_embeddings_BGE2",
+        job_collection="job_embeddings_BGE2",
+        specific_job_ids=[selected_job_id] # Asegurarse de que es una lista
+    )
 
-    print("\n--- Comparación de Puntuaciones de Matching ---")
-    print(f"Oferta: {selected_job_id}")
-    print(f"Puntuación del CV Original: {original_score:.4f}")
-    print(f"Puntuación del CV Adaptado:  {new_score:.4f}")
-    if new_score > original_score:
-        print(f"🎉 ¡Mejora de {(new_score - original_score):.4f} puntos!")
+    # Tomar solo el primer resultado, ya que es contra una sola oferta
+    rematch_data = rematch_data[0] if rematch_data else None
+
+    if not rematch_data:
+        print("Error: No se pudo obtener el nuevo score tras la adaptación.")
     else:
-        print("El score no ha mejorado. Puede que la oferta ya fuera un buen match.")
+        # 3. Mostrar comparación de scores
+        original_score = matching_results[selected_index]['score']
+        new_score = rematch_data['score']
+
+        print("\n--- Comparación de Puntuaciones de Matching ---")
+        print(f"Oferta: {selected_job_id}")
+        print(f"Puntuación del CV Original: {original_score:.4f}")
+        print(f"Puntuación del CV Adaptado:  {new_score:.4f}")
+        if new_score > original_score:
+            print(f"🎉 ¡Mejora de {(new_score - original_score):.4f} puntos!")
+        else:
+            print("El score no ha mejorado. Puede que la oferta ya fuera un buen match.")
 
     print("\n¡Proceso completado!")
 

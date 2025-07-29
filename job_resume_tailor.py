@@ -45,6 +45,7 @@ def generate_tailored_resume(
 You are an expert multilingual resume editor and talent acquisition specialist with deep knowledge of ATS-optimized resume structures. Your task is to revise and restructure the following resume so it aligns as closely as possible with the provided job description and extracted keywords, while also improving its compatibility with Applicant Tracking Systems (ATS).
 
 Instructions:
+- **Identify and preserve the candidate's personal information** (Name, Phone, Email, Location, LinkedIn URL, etc.) from the original resume and place it in the header of the new version.
 - **Detect the language** (English or Spanish) of the resume and job description.
 - Rewrite the resume in the **same language** as the job description.
 - Restructure the resume using a **universal ATS-friendly format** with the following sections (if applicable): 
@@ -128,16 +129,72 @@ def save_rewritten_cv_to_db(cv_id: str, job_id: str, rewritten_text: str, origin
         logger.error(f"Failed to save rewritten CV to MongoDB: {e}")
         return None
 
-def save_text_as_pdf(text: str, output_path: Path):
-    """Saves a string of text to a PDF file."""
+def run_resume_tailoring(
+    cv_id: str,
+    job_id: str,
+    initial_score: float,
+    output_dir: str,
+    cv_collection: str = CV_COLLECTION,
+    job_collection: str = JOB_COLLECTION,
+    client: QdrantClient = None
+) -> Path:
+    """
+    Orchestrates the resume tailoring process.
+    - Fetches data from Qdrant.
+    - Generates tailored resume using Gemini.
+    - Saves result to a Markdown file.
+    - Returns the path to the new file.
+    """
+    if client is None:
+        logger.info("No Qdrant client provided, creating a new one.")
+        client = get_qdrant_client(use_http=True, timeout=60.0)
+
+    logger.info(f"Fetching chunks for CV '{cv_id}' and Job '{job_id}'")
+    cv_chunks = get_all_chunks(client, cv_collection, cv_id)
+    job_chunks = get_all_chunks(client, job_collection, job_id)
+    
+    if not cv_chunks or not job_chunks:
+        error_msg = f"Could not retrieve chunks for CV '{cv_id}' or Job '{job_id}'. Aborting tailoring."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    cv_text = '\n'.join([c.payload['text'] for c in cv_chunks])
+    job_text = '\n'.join([c.payload['text'] for c in job_chunks])
+    cv_keywords = extract_keywords(cv_text)
+    job_keywords = extract_keywords(job_text)
+    
+    logger.info("Generating tailored resume with Gemini...")
+    tailored_text = generate_tailored_resume(
+        raw_resume=cv_text,
+        raw_job_description=job_text,
+        extracted_resume_keywords=cv_keywords,
+        extracted_job_keywords=job_keywords,
+        current_cosine_similarity=initial_score
+    )
+
+    # Guardar en MongoDB
+    logger.info("Saving rewritten CV to MongoDB...")
+    save_rewritten_cv_to_db(
+        cv_id=cv_id,
+        job_id=job_id,
+        rewritten_text=tailored_text,
+        original_cv_text=cv_text
+    )
+
+    # Guardar el resultado como Markdown
     try:
-        doc = SimpleDocTemplate(str(output_path), pagesize=letter)
-        styles = getSampleStyleSheet()
-        story = [Paragraph(line, styles['Normal']) for line in text.split('\n')]
-        doc.build(story)
-        logger.info(f"Tailored resume saved to {output_path}")
+        output_filename = f"CV_{cv_id}_adaptado_para_{job_id}"
+        output_md_path = Path(output_dir) / f"{output_filename}.md"
+        
+        with open(output_md_path, 'w', encoding='utf-8') as f:
+            f.write(tailored_text)
+        
+        logger.info(f"Tailored CV successfully saved to: {output_md_path}")
+        return output_md_path
+        
     except Exception as e:
-        logger.error(f"Failed to save PDF: {e}")
+        logger.error(f"Error saving markdown file: {e}")
+        raise
 
 # --- CLI ---
 def main(args_list=None):
@@ -155,43 +212,23 @@ def main(args_list=None):
     parser.add_argument('--initial_score', type=float, required=True, help='Initial matching score before tailoring')
     args = parser.parse_args(args_list)
     
-    # Usar cliente centralizado con configuración optimizada
-    client = get_qdrant_client(use_http=True, timeout=60.0)
-    cv_chunks = get_all_chunks(client, args.cv_collection, args.cv_id)
-    job_chunks = get_all_chunks(client, args.job_collection, args.job_id)
-    cv_text = '\n'.join([c.payload['text'] for c in cv_chunks])
-    job_text = '\n'.join([c.payload['text'] for c in job_chunks])
-    cv_keywords = extract_keywords(cv_text)
-    job_keywords = extract_keywords(job_text)
-    
-    tailored_text = generate_tailored_resume(
-        raw_resume=cv_text,
-        raw_job_description=job_text,
-        extracted_resume_keywords=cv_keywords,
-        extracted_job_keywords=job_keywords,
-        current_cosine_similarity=args.initial_score
-    )
+    try:
+        output_path = run_resume_tailoring(
+            cv_id=args.cv_id,
+            job_id=args.job_id,
+            initial_score=args.initial_score,
+            output_dir=args.output_dir,
+            cv_collection=args.cv_collection,
+            job_collection=args.job_collection
+        )
+        # Imprimir la ruta del archivo para que otros scripts puedan usarla
+        print(f"TAILORED_CV_PATH:{output_path}")
+        print("\n--- Proceso de Adaptación Finalizado ---")
+        print(f"\nEl CV adaptado ha sido guardado en: {output_path}")
 
-    # Guardar en MongoDB
-    save_rewritten_cv_to_db(
-        cv_id=args.cv_id,
-        job_id=args.job_id,
-        rewritten_text=tailored_text,
-        original_cv_text=cv_text
-    )
-
-    # Guardar el resultado como PDF
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(exist_ok=True)
-    output_filename = f"CV_{args.cv_id}_adaptado_para_{args.job_id}.pdf"
-    output_path = output_dir / output_filename
-
-    save_text_as_pdf(tailored_text, output_path)
-
-    print("\n--- Proceso de Adaptación Finalizado ---")
-    print(f"\nEl CV adaptado ha sido guardado en: {output_path}")
-    # Imprimir solo la ruta al final para que el pipeline la capture
-    print(f"TAILORED_CV_PATH:{output_path}")
+    except Exception as e:
+        print(f"An error occurred during resume tailoring: {e}", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

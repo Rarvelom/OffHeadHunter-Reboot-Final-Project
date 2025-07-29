@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -40,8 +41,12 @@ def get_all_chunks(client: QdrantClient, collection_name: str, doc_id: str) -> L
     # Strategy 1: Try direct retrieve by payload filtering with scroll
     try:
         logger.info(f"Strategy 1: Payload filtering with scroll for {doc_id}")
-        # Construct filter using match on document_id
-        scroll_filter = {"must": [{"key": "document_id", "match": {"value": doc_id}}]}
+        # Construct filter using the modern, correct syntax
+        scroll_filter = Filter(
+            must=[
+                FieldCondition(key="document_id", match=MatchValue(value=doc_id))
+            ]
+        )
         chunks, _ = client.scroll(
             collection_name=collection_name,
             scroll_filter=scroll_filter,
@@ -59,7 +64,11 @@ def get_all_chunks(client: QdrantClient, collection_name: str, doc_id: str) -> L
     try:
         logger.info(f"Strategy 2: Search with exact match filter for {doc_id}")
         dummy_vector = [0.0] * vector_dim
-        query_filter = {"must": [{"key": "document_id", "match": {"value": doc_id}}]}
+        query_filter = Filter(
+            must=[
+                FieldCondition(key="document_id", match=MatchValue(value=doc_id))
+            ]
+        )
         results = client.search(
             collection_name=collection_name,
             query_vector=dummy_vector,

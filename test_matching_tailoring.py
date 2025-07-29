@@ -13,6 +13,9 @@ CV_DIR = UPLOADS_DIR / "cvs"
 JOBS_DIR = UPLOADS_DIR / "job_descriptions"
 TAILORED_CV_DIR = UPLOADS_DIR / "tailored_cvs"
 
+# Ruta al intérprete de Python del entorno virtual
+PYTHON_EXEC = str(BASE_DIR / "offheadhunter_env" / "bin" / "python")
+
 # Importar configuración centralizada
 from qdrant_config import CV_COLLECTION, JOB_COLLECTION
 
@@ -28,6 +31,38 @@ from src.qdrant_storage import QdrantStorage
 import subprocess
 from job_matching import main as job_matching_main
 from job_resume_tailor import main as job_resume_tailor_main
+
+def select_multiple_files_from_dir(directory: Path, file_type: str) -> list[Path]:
+    """Muestra los archivos de un directorio y pide al usuario que seleccione uno o más."""
+    print(f"\n--- Seleccionar {file_type} ---")
+    files = sorted(list(directory.glob("*.pdf")))
+    if not files:
+        print(f"No se encontraron archivos en {directory}. Abortando.")
+        sys.exit(1)
+
+    for i, f in enumerate(files):
+        print(f"[{i + 1}] {f.name}")
+    
+    print(f"\nSeleccione los {file_type} que desea procesar (ej: 1, 3, 5) o presione Enter para seleccionar todos.")
+    
+    selected_files = []
+    while True:
+        try:
+            raw_input = input(f"Seleccione (1-{len(files)}): ")
+            if not raw_input:
+                return files
+            
+            selected_indices = [int(i.strip()) - 1 for i in raw_input.split(',')]
+            
+            if all(0 <= i < len(files) for i in selected_indices):
+                selected_files = [files[i] for i in selected_indices]
+                break
+            else:
+                print("Selección inválida. Asegúrese de que todos los números están en el rango.")
+        except (ValueError, IndexError):
+            print("Entrada inválida. Por favor, introduzca números separados por comas.")
+            
+    return selected_files
 
 def select_file_from_dir(directory: Path, file_type: str) -> Path:
     """Muestra los archivos de un directorio y pide al usuario que seleccione uno."""
@@ -58,6 +93,15 @@ def extract_keywords_from_text(text: str) -> set:
         "de", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "en", "con", "por", "para", "su", "sus"
     }
     return {word for word in words if word not in stop_words and not word.isdigit()}
+
+def read_md_text(md_path: Path) -> str:
+    """Lee todo el texto de un archivo Markdown."""
+    try:
+        with open(md_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        print(f"Error al leer el archivo Markdown {md_path}: {e}")
+        return ""
 
 def read_pdf_text(pdf_path: Path) -> str:
     """Lee todo el texto de un archivo PDF."""
@@ -142,30 +186,40 @@ def main():
     # 1. Seleccionar y procesar CV
     cv_path = select_file_from_dir(CV_DIR, "CV")
     cv_doc_id = cv_path.stem
-    print(f"\n🔍 PASO 1: Procesando CV con Chunking Semántico Optimizado")
-    print(f"📄 Archivo: {cv_path.name}")
+    print(f"\n🔄 PASO 2: Procesando Documentos (CV y Ofertas)")
     print("-" * 60)
-    subprocess.run(['python3', 'process_documents.py', str(cv_path), '--collection', CV_COLLECTION, '--document-type', 'cv'], check=True)
-
-    # 2. Procesar todas las ofertas de trabajo
-    print(f"\n💼 PASO 2: Procesando Ofertas de Trabajo con Chunking Optimizado")
-    print("-" * 60)
-    subprocess.run(['python3', 'process_documents.py', str(JOBS_DIR), '--collection', JOB_COLLECTION, '--document-type', 'job'], check=True)
+    # Procesar el CV seleccionado
+    print(f"Procesando CV: {cv_path.name}")
+    subprocess.run([PYTHON_EXEC, 'process_documents.py', str(cv_path), '--collection', CV_COLLECTION, '--document-type', 'cv'], check=True)
+    
+    # Seleccionar y procesar las ofertas de trabajo deseadas
+    selected_job_files = select_multiple_files_from_dir(JOBS_DIR, "ofertas de trabajo")
+    selected_job_ids = []
+    print(f"\nProcesando {len(selected_job_files)} oferta(s) seleccionada(s)...")
+    for job_file in selected_job_files:
+        print(f"  - {job_file.name}")
+        subprocess.run([PYTHON_EXEC, 'process_documents.py', str(job_file), '--collection', JOB_COLLECTION, '--document-type', 'job'], check=True)
+        selected_job_ids.append(job_file.stem)
 
     # 3. Ejecutar matching
     print(f"\n🎯 PASO 3: Realizando Matching Semántico CV ↔ Ofertas")
     print("-" * 60)
-    old_stdout = sys.stdout
-    redirected_output = sys.stdout = io.StringIO()
-    job_matching_main(['--cv_id', cv_doc_id, '--cv_collection', CV_COLLECTION, '--job_collection', JOB_COLLECTION])
-    sys.stdout = old_stdout
-    
-    output = redirected_output.getvalue()
+    old_stdout_match = sys.stdout
+    redirected_output_match = sys.stdout = io.StringIO()
+    # Ejecutar matching solo contra las ofertas seleccionadas
+    job_matching_main([
+        '--cv_id', cv_doc_id,
+        '--job_ids', ','.join(selected_job_ids),
+        '--cv_collection', CV_COLLECTION,
+        '--job_collection', JOB_COLLECTION
+    ])
+    sys.stdout = old_stdout_match
+    match_output = redirected_output_match.getvalue()
     try:
-        matching_results = json.loads(output)
+        matching_results = json.loads(match_output)
     except json.JSONDecodeError:
         print("❌ Error: El script de matching no produjo un JSON válido.")
-        print("Salida recibida:", output)
+        print("Salida recibida:", match_output)
         return
 
     if not matching_results:
@@ -222,7 +276,7 @@ def main():
     print(f"\n🔄 PASO 5: Procesando el CV Adaptado para Re-evaluación")
     print(f"📄 Archivo: {tailored_cv_path.name}")
     print("-" * 60)
-    subprocess.run(['python3', 'process_documents.py', str(tailored_cv_path), '--collection', CV_COLLECTION, '--document-type', 'cv'], check=True)
+    subprocess.run([PYTHON_EXEC, 'process_documents.py', str(tailored_cv_path), '--collection', CV_COLLECTION, '--document-type', 'cv'], check=True)
 
     # 7. Re-ejecutar matching
     print(f"\n🎯 PASO 6: Re-evaluando el Matching Semántico")
@@ -267,7 +321,8 @@ def main():
 
     # 9. Analizar y mostrar los cambios de palabras clave
     original_cv_text = read_pdf_text(cv_path)
-    tailored_cv_text = read_pdf_text(tailored_cv_path)
+    # El CV adaptado ahora es un .md
+    tailored_cv_text = read_md_text(tailored_cv_path)
     # Construir la ruta al PDF de la oferta de trabajo a partir de su ID
     job_offer_path = JOBS_DIR / f"{selected_job_id}.pdf"
     job_text = read_pdf_text(job_offer_path)
