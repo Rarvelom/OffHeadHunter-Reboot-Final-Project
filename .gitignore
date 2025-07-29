@@ -1,16 +1,5 @@
 /offheadhunter_env
-/src/testing/
-src/testing.py
-src/prettify.py
 .env
 __pycache__
-job_search_agent.backup.py
-Update_job_embeddings.py
-/app_testing
-/app_testing/obsolete
-src/ij_jobs_scraper.py.backup
-job_search_agent.py.backup2
 cv_rewriter_agent.py
-ricky_integrated_pipeline.py
-qdrant_config.py.backup
 /uploads/tailored_cvs

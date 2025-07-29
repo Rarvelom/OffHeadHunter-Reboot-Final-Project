@@ -81,7 +81,7 @@ Debes identificar y transformar los siguientes cuatro campos clave, devolviendo 
     - Si el usuario no especifica ninguna ubicación concreta, indica que no le importa la localidad o que está abierto a cualquier ubicación (o responde "España") devuelve el código 0.
     
 
-4. work_modality: Traduce a los códigos: Presencial=1, A distancia=2, Híbrido=3, Sin especificar=4. Puede ser varios (ej: "2,3"). Si dice que no tiene preferencia, le es indiferente, o no encaja con ninguno de los otros códigos, devuelve 0".
+4. work_modality: Traduce a los códigos: Presencial=1, A distancia=2, Híbrido=3, Sin especificar=4. Puede ser varios (ej: "2,3"). Si selecciona una o dos modalidades como preferencia (ej: Presencial y Híbrido, o Remoto y Híbrido), incluye también la modalidad "Sin especificar" (4). Si dice que no tiene preferencia, le es indiferente, o no encaja con ninguno de los otros códigos, devuelve 0".
 
 IMPORTANTE:
 - Analiza toda la conversación para encontrar la información más actualizada y relevante sobre cada campo, aunque el usuario haya cambiado de opinión.
@@ -175,122 +175,74 @@ class JobSearchAgent:
         else:
             print("No se encontró un perfil con este user_id.")
 
-    def upload_cv(self):
-        print("\n" + "="*60)
-        print("SUBA SU CURRÍCULUM VITAE (CV)")
-        print("="*60)
-        print("\nPor favor, proporcione la ruta completa a su archivo CV (formato PDF o DOCX):")
-        while True:
-            cv_path = input("> ").strip()
-            if not cv_path:
-                print("Por favor, proporcione una ruta válida.")
-                continue
-            if not os.path.isfile(cv_path):
-                print(f"Error: No se encontró el archivo en la ruta: {cv_path}")
-                continue
+    def upload_cv(self, file_path=None):
+        """
+        Procesa y sube el CV a MongoDB/Qdrant.
+        - file_path: ruta al archivo, si None usa input() (modo CLI).
+        """
+        if file_path is None:
+            print("\nPor favor, proporcione la ruta completa a su archivo CV:")
+            while True:
+                file_path = input("> ").strip()
+                if file_path:
+                    break
 
-            file_ext = os.path.splitext(cv_path)[1].lower()
-            if file_ext not in ['.pdf', '.docx']:
-                print("Error: Solo se admiten archivos PDF o DOCX.")
-                continue
+        cv_path = Path(file_path)
+        if not cv_path.exists():
+            raise FileNotFoundError(f"No se encontró el archivo: {cv_path}")
 
-            with open(cv_path, "rb") as f:
-                cv_data = f.read()
+        file_ext = cv_path.suffix.lower()
+        if file_ext not in ['.pdf', '.docx']:
+            raise ValueError("Solo se admiten archivos PDF o DOCX.")
 
-            # Extract text from file
-            cv_id = str(uuid.uuid4())
-            filename = os.path.basename(cv_path)
-            uploaded_at = datetime.utcnow().isoformat()
+        with open(cv_path, "rb") as f:
+            cv_data = f.read()
 
-            elements = partition(cv_path)
-            cv_text = "\n".join([str(el) for el in elements])
+        # Extraer texto
+        elements = partition(str(cv_path))
+        cv_text = "\n".join([str(el) for el in elements])
 
-            ##### ESTRUCTURA SIMPLE, LA REEMPLAZAMOS POR LA UTILIZADA EN "job_search_agent.py"
-            # cv_record = {
-            #     "user_id": self.user_id,
-            #     "cv": cv_data,
-            #     "filename": os.path.basename(cv_path),
-            #     "uploaded_at": datetime.now()
-            # }
+        cv_id = str(uuid.uuid4())
+        filename = cv_path.name
+        uploaded_at = datetime.utcnow().isoformat()
 
-            cv_record = {
-                'user_id': self.user_id,
-                'cv_id': cv_id,
-                'filename': filename,
-                'file_url': f"file://{cv_path}",  # URL del archivo
-                'original_text': cv_text,
-                'version': 1,  # Version inicial
-                'vectorized': False,  # Will be updated after Qdrant save
-                'uploaded_at': uploaded_at,
-                'status': 'pending',
-                'file_binary': Binary(cv_data),  # Binario original del CV (PDF o DOCX)
-                'metadata': {
-                    'file_size': len(cv_data),
-                    'file_type': file_ext[1:],  # Tipo de archivo (PDF o DOCX), se extrae el punto de la extensión.
-                    'pages': len(cv_text.split('\n'))  # Paginas estimadas
-                }
+        cv_record = {
+            'user_id': self.user_id,
+            'cv_id': cv_id,
+            'filename': filename,
+            'file_url': f"file://{cv_path}",
+            'original_text': cv_text,
+            'version': 1,
+            'vectorized': False,
+            'uploaded_at': uploaded_at,
+            'status': 'pending',
+            'file_binary': Binary(cv_data),
+            'metadata': {
+                'file_size': len(cv_data),
+                'file_type': file_ext[1:],
+                'pages': len(cv_text.split('\n'))
             }
+        }
 
-            # 1. Guardar embedding en Qdrant (si hay texto y cliente Qdrant)
-            if hasattr(self, 'qdrant_client') and self.qdrant_client:
-                if not cv_text:
-                    print("Warning: CV text is empty. Cannot save to Qdrant.")
-                    cv_record['status'] = 'error'
-                    cv_record['error'] = 'CV text is empty'
-                else:
-                    try:
-                        embedding = self.embedding_model.encode(cv_text).tolist()
-                        # Guardar en Qdrant
-                        self.qdrant_client.upsert(
-                            collection_name="cv_embeddings_BGE",
-                            points=[
-                                models.PointStruct(
-                                    id=cv_id,
-                                    vector=embedding,
-                                    payload={
-                                        "mongodb_id": "",  # Se actualizará tras guardar en MongoDB
-                                        "filename": filename,
-                                        "text": cv_text,
-                                        "uploaded_at": uploaded_at
-                                    }
-                                )
-                            ],
-                            wait=True
-                        )
-                        cv_record['embedding_vector_id_qdrant'] = cv_id
-                        cv_record['embedding_model'] = 'BGE-m3'
-                        cv_record['vectorized'] = True
-                        print(f"CV '{filename}' guardado en Qdrant con id {cv_id}")
-                    except Exception as e:
-                        print(f"Failed to save CV to Qdrant: {e}")
-                        cv_record['status'] = 'error'
-                        cv_record['error'] = str(e)
-            else:
-                print("Qdrant client not available. Cannot save vector data.")
-                cv_record['status'] = 'error'
-                cv_record['error'] = 'Qdrant client not available'
+        # Guardar embedding en Qdrant
+        if self.qdrant_client:
+            embedding = self.embedding_model.encode(cv_text).tolist()
+            self.qdrant_client.upsert(
+                collection_name="cv_embeddings_BGE2",
+                points=[models.PointStruct(
+                    id=cv_id,
+                    vector=embedding,
+                    payload={"filename": filename, "text": cv_text}
+                )]
+            )
+            cv_record['embedding_vector_id_qdrant'] = cv_id
+            cv_record['vectorized'] = True
 
-            # 2. Guardar en MongoDB
-            result = self.cv_uploads.insert_one(cv_record)
+        self.cv_uploads.insert_one(cv_record)
+        self.user_profile['cv_path'] = str(cv_path)
+        self.save_profile()
+        return str(cv_path)
 
-            # 3. Actualizar payload en Qdrant con el ID de MongoDB
-            if cv_record.get('vectorized', False) and hasattr(self, 'qdrant_client') and self.qdrant_client:
-                try:
-                    self.qdrant_client.set_payload(
-                        collection_name="cv_embeddings_BGE",
-                        payload={"mongodb_id": str(result.inserted_id)},
-                        points=[cv_record['embedding_vector_id_qdrant']]
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not update Qdrant with MongoDB ID: {e}")
-
-            print("CV subido y guardado en la base de datos.")
-
-            self.user_profile['cv_path'] = cv_path
-            self.save_profile() # Guardar el perfil actualizado en la base de datos
-            print(self.user_profile)
-
-            break
 
 def parse_profile_from_text(history_text):
     return JobSearchAgent().parse_profile_from_text(history_text)

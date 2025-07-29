@@ -45,6 +45,19 @@ class AgentChatbot:
         print("Conversación finalizada.")
         return history
 
+    def start_session(self):
+        """Inicia una sesión de chat y devuelve el objeto de chat y el historial."""
+        chat = self.model.start_chat(history=[])
+        chat.send_message(self.prompt)
+        return chat, []
+
+    def send_message(self, chat, history, user_input):
+        """Envía un mensaje y devuelve la respuesta."""
+        response = chat.send_message(user_input)
+        history.append(("Usuario", user_input))
+        history.append(("Asistente", response.text))
+        return response.text, history, self.trigger in response.text
+
 def run_chatbot_conversation():
     return AgentChatbot().run_conversation()
 
