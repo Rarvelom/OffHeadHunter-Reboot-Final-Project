@@ -13,6 +13,7 @@ from src.text_processing import TextProcessor
 from src.qdrant_storage import QdrantStorage
 from job_matching import match_cv_to_jobs
 from job_resume_tailor import run_resume_tailoring
+import streamlit.components.v1 as components
 from qdrant_config import get_qdrant_client
 import concurrent.futures
 import streamlit as st
@@ -98,35 +99,55 @@ if st.session_state.step == 1:
     with col1:
         st.subheader("💬 Chatbot")
 
-        # --- CSS dinámico para ventana scrollable ---
+        # --- CSS dinámico para ventana scrollable        # Estilos para el chat con mejor soporte para auto-scroll
         st.markdown("""
-            <style>
-            .chat-window {
-                height: 50vh;
-                min-height: 200px;
-                max-height: 70vh;
-                overflow-y: auto;
-                padding: 10px;
-                border: 1px solid #444;
-                border-radius: 8px;
-                background-color: #1e1e1e;
-                margin-bottom: 10px;
-            }
-            .user-msg {
-                color: #fff;
-                background-color: #333;
-                padding: 6px 10px;
-                border-radius: 6px;
-                margin-bottom: 4px;
-            }
-            .bot-msg {
-                color: #ffd;
-                background-color: #444;
-                padding: 6px 10px;
-                border-radius: 6px;
-                margin-bottom: 4px;
-            }
-            </style>
+        <style>
+        .chat-window {
+            height: 50vh;
+            min-height: 200px;
+            max-height: 70vh;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #444;
+            border-radius: 8px;
+            background-color: #1e1e1e;
+            margin-bottom: 10px;
+            scroll-behavior: smooth;
+            display: flex;
+            flex-direction: column;
+        }
+        .chat-messages {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+        .chat-bottom {
+            float: left;
+            clear: both;
+            height: 0px;
+        }
+        .user-msg {
+            color: #ffd;
+            background-color: #2a6f97;
+            padding: 6px 10px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            width: fit-content;
+            max-width: 80%;
+            align-self: flex-end;
+        }
+        .bot-msg {
+            color: #ffd;
+            background-color: #444;
+            padding: 6px 10px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+            width: fit-content;
+            max-width: 80%;
+            align-self: flex-start;
+        }
+        </style>
         """, unsafe_allow_html=True)
 
         if 'chatbot' not in st.session_state:
@@ -134,15 +155,65 @@ if st.session_state.step == 1:
             st.session_state.chat, st.session_state.chat_history = st.session_state.chatbot.start_session()
             st.session_state.finished_chat = False
 
-        # ✅ Historial renderizado como HTML dentro del contenedor
-        chat_html = '<div class="chat-window">'
+        # ✅ Estilo CSS para la ventana del chat
+        st.markdown("""
+        <style>
+        .chat-window {
+            height: 50vh;
+            min-height: 200px;
+            max-height: 70vh;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #444;
+            border-radius: 8px;
+            background-color: #1e1e1e;
+            margin-bottom: 10px;
+            scroll-behavior: smooth;
+        }
+        .user-msg {
+            color: #ffd;
+            background-color: #2a6f97;
+            padding: 6px 10px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+        }
+        .bot-msg {
+            color: #ffd;
+            background-color: #444;
+            padding: 6px 10px;
+            border-radius: 6px;
+            margin-bottom: 4px;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # ✅ Historial renderizado como HTML dentro del contenedor con auto-scroll
+        chat_html = '''
+        <div class="chat-window" id="chat-window">
+        '''
+        
         for role, msg in st.session_state.chat_history:
             if role == "Usuario":
                 chat_html += f'<div class="user-msg">👤 {msg}</div>'
             else:
                 chat_html += f'<div class="bot-msg">🤖 {msg}</div>'
-        chat_html += '</div>'
+                
+        chat_html += '''
+        </div>
+        '''
+        
         st.markdown(chat_html, unsafe_allow_html=True)
+        
+        # Auto-scroll implementation with direct JavaScript
+        st.markdown("""
+        <script>
+        // Auto-scroll to bottom of chat window
+        var chatWindow = document.getElementById('chat-window');
+        if (chatWindow) {
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+        </script>
+        """, unsafe_allow_html=True)
 
         # ✅ Input debajo
         if not st.session_state.finished_chat:

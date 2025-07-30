@@ -49,7 +49,11 @@ class AgentChatbot:
         """Inicia una sesión de chat y devuelve el objeto de chat y el historial."""
         chat = self.model.start_chat(history=[])
         chat.send_message(self.prompt)
-        return chat, []
+        # Send initial welcome message
+        welcome_message = "¡Hola! Soy tu asistente laboral de OffHeadHunter. Estoy aquí para ayudarte a construir tu perfil de búsqueda de empleo.\n\nPara comenzar, cuéntame: ¿Qué profesión o cargo te gustaría encontrar en tu próxima oportunidad laboral?"
+        response = chat.send_message(welcome_message)
+        history = [("Asistente", welcome_message)]
+        return chat, history
 
     def send_message(self, chat, history, user_input):
         """Envía un mensaje y devuelve la respuesta."""
