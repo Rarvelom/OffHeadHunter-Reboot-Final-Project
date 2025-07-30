@@ -97,26 +97,63 @@ if st.session_state.step == 1:
 
     with col1:
         st.subheader("💬 Chatbot")
+
+        # --- CSS dinámico para ventana scrollable ---
+        st.markdown("""
+            <style>
+            .chat-window {
+                height: 50vh;
+                min-height: 200px;
+                max-height: 70vh;
+                overflow-y: auto;
+                padding: 10px;
+                border: 1px solid #444;
+                border-radius: 8px;
+                background-color: #1e1e1e;
+                margin-bottom: 10px;
+            }
+            .user-msg {
+                color: #fff;
+                background-color: #333;
+                padding: 6px 10px;
+                border-radius: 6px;
+                margin-bottom: 4px;
+            }
+            .bot-msg {
+                color: #ffd;
+                background-color: #444;
+                padding: 6px 10px;
+                border-radius: 6px;
+                margin-bottom: 4px;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
         if 'chatbot' not in st.session_state:
             st.session_state.chatbot = AgentChatbot()
             st.session_state.chat, st.session_state.chat_history = st.session_state.chatbot.start_session()
             st.session_state.finished_chat = False
 
+        # ✅ Historial renderizado como HTML dentro del contenedor
+        chat_html = '<div class="chat-window">'
         for role, msg in st.session_state.chat_history:
-            with st.chat_message("user" if role == "Usuario" else "assistant"):
-                st.markdown(msg)
+            if role == "Usuario":
+                chat_html += f'<div class="user-msg">👤 {msg}</div>'
+            else:
+                chat_html += f'<div class="bot-msg">🤖 {msg}</div>'
+        chat_html += '</div>'
+        st.markdown(chat_html, unsafe_allow_html=True)
 
+        # ✅ Input debajo
         if not st.session_state.finished_chat:
             user_input = st.chat_input("Escribe tus preferencias laborales...")
             if user_input:
-                with st.chat_message("user"):
-                    st.markdown(user_input)
+                # Dejar que send_message actualice el historial
                 response, st.session_state.chat_history, finished = st.session_state.chatbot.send_message(
                     st.session_state.chat, st.session_state.chat_history, user_input
                 )
-                with st.chat_message("assistant"):
-                    st.markdown(response)
                 st.session_state.finished_chat = finished
+                st.rerun()
 
     with col2:
         st.subheader("📄 Sube tu CV")
@@ -140,10 +177,30 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.header("Paso 2: Ofertas encontradas")
 
-    # Generar URL de InfoJobs según perfil (mock aquí, integrar real luego)
-    search_url = "https://www.infojobs.net/ofertas-trabajo?keyword=developer"
+    # ✅ 1. Parsear historial de chat a JSON con JobSearchAgent
+    if 'search_url' not in st.session_state:
+        st.info("🔍 Analizando la conversación para construir la búsqueda personalizada...")
+        agent = JobSearchAgent()
+        history_text = "\n".join([f"{role}: {msg}" for role, msg in st.session_state.chat_history])
+        user_profile = agent.parse_profile_from_text(history_text)  # <-- Devuelve JSON con campos
+
+        # ✅ 2. Construir URL personalizada de InfoJobs
+        puesto = user_profile.get('job_title')
+        modalidad = user_profile.get('work_modality')
+        salario_min = user_profile.get('salary_expectation')
+        localidades = user_profile.get('location')
+
+        st.session_state.search_url = generar_url_infojobs(
+            puesto=puesto,
+            modalidad=modalidad,
+            salario_minimo=salario_min,
+            localidades=localidades
+        )
+
+    # ✅ 3. Scraping usando la URL generada
     if 'job_offers' not in st.session_state:
-        st.session_state.job_offers = scrape_jobs(search_url)
+        st.info(f"🌐 Buscando ofertas en InfoJobs para: {st.session_state.search_url}")
+        st.session_state.job_offers = scrape_jobs(st.session_state.search_url)
 
     offers = st.session_state.job_offers
     if not offers:
@@ -157,8 +214,38 @@ elif st.session_state.step == 2:
     selected_indices = []
     for idx, offer in enumerate(offers):
         with st.expander(f"{offer.get('title', 'Sin título')} – {offer.get('company', 'Empresa')}"):
-            st.markdown(f"**Ubicación:** {', '.join(offer.get('locations', []))}")
+            # --- Descripción ---
             st.markdown(f"**Descripción:** {offer.get('description', '')[:250]}...")
+
+            # --- Ubicación ---
+            st.markdown(f"**Ubicación:** {', '.join(offer.get('locations', []))}")
+
+            # --- Modalidad (tags invertidos) ---
+            tags = offer.get('tags', [])
+            if tags:
+                # Invertir orden si hay elementos
+                inverted_tags = list(reversed(tags))
+                st.markdown(f"**Modalidad:** {', '.join(inverted_tags)}")
+
+            # --- Salario (rango) ---
+            salary = offer.get('salary_range')
+            if salary:
+                min_salary = salary.get('min')
+                max_salary = salary.get('max')
+                currency = salary.get('currency', 'EUR')
+                if min_salary is not None and max_salary is not None:
+                    st.markdown(f"**Salario:** {min_salary} - {max_salary} {currency}")
+                elif min_salary is not None:
+                    st.markdown(f"**Salario:** Desde {min_salary} {currency}")
+                elif max_salary is not None:
+                    st.markdown(f"**Salario:** Hasta {max_salary} {currency}")
+
+            # --- URL clicable ---
+            url = offer.get('url')
+            if url:
+                st.markdown(f"[🔗 Ver oferta original]({url})", unsafe_allow_html=True)
+
+            # --- Checkbox selección ---
             checked = st.checkbox("Seleccionar", key=f"offer_{idx}")
             if checked:
                 selected_indices.append(idx)
