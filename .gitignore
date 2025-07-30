@@ -2,4 +2,4 @@
 .env
 __pycache__
 cv_rewriter_agent.py
-/uploads/tailored_cvs
+/uploads

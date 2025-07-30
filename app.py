@@ -394,11 +394,129 @@ elif st.session_state.step == 4:
 
         # Vista previa CV
         st.subheader("📄 Vista previa CV Adaptado")
+        
+        # Leer el contenido del CV adaptado
         try:
-            content = Path(st.session_state.tailored_cv_path).read_text(encoding='utf-8')
+            with open(st.session_state.tailored_cv_path, 'r', encoding='utf-8') as f:
+                content = f.read()
         except:
             content = "(No se pudo cargar el contenido)"
-        st.text_area("Contenido CV Adaptado", content, height=300)
+        
+        # Mostrar el CV en formato HTML con estilo
+        st.markdown("""
+        <style>
+        .cv-container {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 800px;
+        }
+        .cv-header {
+            text-align: center;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
+        }
+        .cv-section {
+            margin-bottom: 20px;
+        }
+        .cv-section-title {
+            color: #007bff;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 5px;
+            margin-bottom: 10px;
+        }
+        .cv-content {
+            line-height: 1.6;
+        }
+        .download-btn {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 0;
+        }
+        .download-btn:hover {
+            background-color: #0056b3;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # Botón de descarga PDF
+        if st.button("📥 Descargar CV como PDF"):
+            # Crear un nombre de archivo limpio
+            filename = os.path.basename(str(st.session_state.tailored_cv_path)).replace('.md', '.pdf')
+            
+            # Convertir markdown a HTML básico para la descarga
+            import markdown
+            html_content = markdown.markdown(content)
+            
+            # Crear HTML completo para PDF
+            html_for_pdf = f"""
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    h1, h2, h3 {{ color: #333; }}
+                    h1 {{ border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
+                    h2 {{ border-bottom: 1px solid #ddd; padding-bottom: 5px; }}
+                    .section {{ margin-bottom: 20px; }}
+                </style>
+            </head>
+            <body>
+                {html_content}
+            </body>
+            </html>
+            """
+            
+            # Guardar HTML temporalmente
+            temp_html_path = str(st.session_state.tailored_cv_path).replace('.md', '_temp.html')
+            with open(temp_html_path, 'w', encoding='utf-8') as f:
+                f.write(html_for_pdf)
+            
+            # Usar weasyprint para convertir a PDF
+            try:
+                import weasyprint
+                pdf_path = str(st.session_state.tailored_cv_path).replace('.md', '.pdf')
+                weasyprint.HTML(temp_html_path).write_pdf(pdf_path)
+                
+                # Ofrecer descarga
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        label=".Descargar PDF",
+                        data=f,
+                        file_name=filename,
+                        mime="application/pdf"
+                    )
+                
+                # Limpiar archivos temporales
+                os.remove(temp_html_path)
+                os.remove(pdf_path)
+            except Exception as e:
+                st.error(f"Error al generar PDF: {str(e)}")
+                st.info("Asegúrate de tener instalado weasyprint: pip install weasyprint")
+
+        # Mostrar contenido del CV como HTML
+        try:
+            import markdown
+            html_content = markdown.markdown(content)
+            st.markdown(f"""
+            <div class="cv-container">
+                <div class="cv-content">
+                    {html_content}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Error al mostrar el CV: {str(e)}")
+            st.text_area("Contenido CV Adaptado", content, height=300)
 
         # Comparación de scores
         st.subheader("📊 Comparación de Scores")

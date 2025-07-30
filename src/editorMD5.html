@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Editor</title>
+  <link rel="stylesheet" href="https://uicdn.toast.com/editor/latest/toastui-editor.min.css" />
+  <script src="https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 1rem; background: #f9f9f9; }
+    #editor { border: 1px solid #ccc; margin: 0 auto 1rem; max-width: 900px; background: white; padding: 2rem; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+    #botones { display: flex; gap: 1rem; margin-bottom: 1rem; }
+    input[type="file"] { display: none; }
+  </style>
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        processEscapes: true
+      },
+      svg: { fontCache: 'global' }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+  <h1>Editor 📜</h1>
+  <div id="botones">
+    <button id="imprimir">🖨️ Imprimir / Guardar como PDF</button>
+    <label for="fileInput" style="cursor: pointer;">📂 Cargar archivo local</label>
+    <input type="file" id="fileInput" accept=".md,.txt" />
+  </div>
+  <div id="editor"></div>
+  <script>
+    const editor = new toastui.Editor({
+      el: document.querySelector('#editor'),
+      height: '500px',
+      initialEditType: 'wysiwyg',
+      hideModeSwitch: true,
+      initialValue: ''
+    });
+
+    function desescaparMarkdown(str) {
+      return str
+        .replace(/\\#/g, '#')
+        .replace(/\\\*/g, '*')
+        .replace(/\"/g, '"')
+        .replace(/\\\\/g, '\\');
+    }
+
+    document.getElementById('imprimir').onclick = () => {
+      const html = editor.getHTML();
+
+      const nuevaVentana = window.open('', '_blank');
+      if (!nuevaVentana) return alert("❌ Bloqueado por el navegador. Permite ventanas emergentes.");
+
+      nuevaVentana.document.write(`
+        <html>
+          <head>
+            <title>Pliego de licitación</title>
+            <style>
+              body {
+                font-family: serif;
+                padding: 3rem;
+                line-height: 1.6;
+                color: #000;
+                margin: 0 auto;
+                max-width: 900px;
+              }
+              #boton-descargar {
+                display: inline-block;
+                padding: 0.5rem 1rem;
+                margin-bottom: 2rem;
+                background: #007bff;
+                color: white;
+                border: none;
+                cursor: pointer;
+                font-size: 14px;
+                border-radius: 4px;
+              }
+              #boton-descargar:hover {
+                background: #0056b3;
+              }
+              @media print {
+                #boton-descargar {
+                  display: none !important;
+                }
+                @page { margin: 2cm; }
+                body { margin: 0; }
+              }
+            </style>
+          </head>
+          <body>
+            <button id="boton-descargar">📥 Descargar PDF</button>
+            <div id="contenido">${html}</div>
+            <script>
+              document.getElementById('boton-descargar').onclick = () => {
+                window.print();
+              };
+            <\/script>
+          </body>
+        </html>
+      `);
+
+      nuevaVentana.document.close();
+      nuevaVentana.focus();
+    };
+
+    document.getElementById('fileInput').addEventListener('change', (event) => {
+      const archivo = event.target.files[0];
+      if (!archivo) return;
+      const lector = new FileReader();
+      lector.onload = (e) => {
+        let contenido = e.target.result;
+        function limpiarFormulaLatex(formula) {
+          return formula.replace(/\\=/g, '=').replace(/\\_/g, '_')
+                        .replace(/\\\\/g, '\\').replace(/\\;/g, ' ')
+                        .replace(/×/g, '\\times').replace(/\\{2,}/g, '\\').trim();
+        }
+        const formulas = [];
+        contenido = contenido.replace(/\$\$(.*?)\$\$/gs, (match, formula) => {
+          const limpia = limpiarFormulaLatex(formula);
+          const index = formulas.length;
+          formulas.push(`$$${limpia}$$`);
+          return `§§FORMULA_${index}§§`;
+        });
+        let textoLimpio = contenido.replace(/\r/g, '')
+          .replace(/\\#/g, '#').replace(/\\\*/g, '*')
+          .replace(/\\_/g, '_').replace(/\\=/g, '=')
+          .replace(/\\;/g, ' ').replace(/\\\[/g, '[')
+          .replace(/\\\]/g, ']').replace(/\\{/g, '{')
+          .replace(/\\}/g, '}').replace(/\\~/g, '~')
+          .replace(/\\`/g, '`').replace(/\\'/g, "'")
+          .replace(/\"/g, '"').replace(/\\\\/g, '\\')
+          .replace(/^[ \t]*\\{1,2}/gm, '')
+          .replace(/[^\S\r\n]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n');
+        formulas.forEach((f, i) => {
+          textoLimpio = textoLimpio.replace(`§§FORMULA_${i}§§`, f);
+        });
+        editor.setMarkdown(textoLimpio);
+        if (window.MathJax?.typesetPromise) MathJax.typesetPromise();
+      };
+      lector.readAsText(archivo, 'utf-8');
+    });
+  </script>
+</body>
+</html>
