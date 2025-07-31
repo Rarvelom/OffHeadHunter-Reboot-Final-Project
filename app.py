@@ -19,6 +19,11 @@ import concurrent.futures
 import streamlit as st
 from pathlib import Path
 import tempfile
+import base64
+from bs4 import BeautifulSoup
+import re
+from PIL import Image
+import io
 
 # --- Configuracion de Directorios ---
 BASE_DIR = Path(__file__).parent
@@ -631,20 +636,262 @@ elif st.session_state.step == 4:
                 st.error(f"Error al generar PDF: {str(e)}")
                 st.info("Asegúrate de tener instalado weasyprint: pip install weasyprint")
 
-        # Mostrar contenido del CV como HTML
-        try:
-            import markdown
-            html_content = markdown.markdown(content)
-            st.markdown(f"""
-            <div class="cv-container">
-                <div class="cv-content">
-                    {html_content}
+        # Añadir un modo de edición en el paso 4 del CV adaptado
+        if 'cv_edit_mode' not in st.session_state:
+            st.session_state.cv_edit_mode = "Vista"
+
+        # Botones para cambiar entre vista y edición
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📄 Vista previa", use_container_width=True, 
+                         disabled=st.session_state.cv_edit_mode == "Vista"):
+                st.session_state.cv_edit_mode = "Vista"
+                st.rerun()
+        with col2:
+            if st.button("✏️ Editar CV", use_container_width=True,
+                         disabled=st.session_state.cv_edit_mode == "Editar"):
+                st.session_state.cv_edit_mode = "Editar"
+                st.rerun()
+
+        # Dependiendo del modo, mostrar vista o editor
+        if st.session_state.cv_edit_mode == "Vista":
+            # Código actual para mostrar el CV
+            try:
+                import markdown
+                html_content = markdown.markdown(content)
+                st.markdown(f"""
+                <div class="cv-container">
+                    <div class="cv-content">
+                        {html_content}
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
-        except Exception as e:
-            st.error(f"Error al mostrar el CV: {str(e)}")
-            st.text_area("Contenido CV Adaptado", content, height=300)
+                """, unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Error al mostrar el CV: {str(e)}")
+                st.text_area("Contenido CV Adaptado", content, height=300)
+        else:
+            # Modo de edición sencillo
+            st.subheader("✏️ Editor de CV")
+            
+            # Editor visual sencillo estilo Word/Docs
+            editor_html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Editor Sencillo</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
+                    .editor-container { border: 1px solid #ccc; border-radius: 5px; margin-bottom: 10px; }
+                    .toolbar { 
+                        padding: 8px; 
+                        background: #f5f5f5; 
+                        border-bottom: 1px solid #ddd;
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 5px;
+                    }
+                    .toolbar button { 
+                        padding: 5px 10px; 
+                        background: #fff; 
+                        border: 1px solid #ccc;
+                        border-radius: 3px;
+                        cursor: pointer;
+                    }
+                    .toolbar button:hover { background: #e9e9e9; }
+                    .toolbar select { 
+                        padding: 5px;
+                        border: 1px solid #ccc;
+                        border-radius: 3px;
+                    }
+                    #editor-content {
+                        min-height: 400px;
+                        padding: 15px;
+                        overflow-y: auto;
+                        background: white;
+                        font-size: 14px;
+                    }
+                    .hidden { display: none; }
+                </style>
+            </head>
+            <body>
+                <div class="editor-container">
+                    <div class="toolbar">
+                        <select id="heading-select">
+                            <option value="p">Párrafo</option>
+                            <option value="h1">Título 1</option>
+                            <option value="h2">Título 2</option>
+                            <option value="h3">Título 3</option>
+                        </select>
+                        <button id="btn-bold" title="Negrita"><b>B</b></button>
+                        <button id="btn-italic" title="Cursiva"><i>I</i></button>
+                        <button id="btn-underline" title="Subrayado"><u>U</u></button>
+                        <button id="btn-bullet" title="Lista con viñetas">• Lista</button>
+                        <button id="btn-numbered" title="Lista numerada">1. Lista</button>
+                        <button id="btn-image" title="Insertar imagen">🖼️ Imagen</button>
+                        <input type="file" id="image-input" class="hidden" accept="image/*">
+                    </div>
+                    <div id="editor-content" contenteditable="true"></div>
+                </div>
+                
+                <script>
+                    // Inicializar el editor con el contenido actual
+                    const editorContent = document.getElementById('editor-content');
+                    const initialContent = `CONTENT_PLACEHOLDER`;
+                    
+                    // Convertir Markdown a HTML básico
+                    function markdownToHtml(markdown) {
+                        return markdown
+                            .replace(/^# (.*$)/gm, '<h1>$1</h1>')
+                            .replace(/^## (.*$)/gm, '<h2>$1</h2>')
+                            .replace(/^### (.*$)/gm, '<h3>$1</h3>')
+                            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                            .replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" alt="$1">')
+                            .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2">$1</a>')
+                            .replace(/^- (.*$)/gm, '<ul><li>$1</li></ul>')
+                            .replace(/^[0-9]+\\. (.*$)/gm, '<ol><li>$1</li></ol>');
+                    }
+                    
+                    // Establecer contenido inicial
+                    editorContent.innerHTML = markdownToHtml(initialContent);
+                    
+                    // Función para obtener el HTML del editor
+                    function getEditorHtml() {
+                        return editorContent.innerHTML;
+                    }
+                    
+                    // Aplicar formato cuando se hace clic en los botones
+                    document.getElementById('btn-bold').addEventListener('click', () => {
+                        document.execCommand('bold', false, null);
+                    });
+                    
+                    document.getElementById('btn-italic').addEventListener('click', () => {
+                        document.execCommand('italic', false, null);
+                    });
+                    
+                    document.getElementById('btn-underline').addEventListener('click', () => {
+                        document.execCommand('underline', false, null);
+                    });
+                    
+                    document.getElementById('btn-bullet').addEventListener('click', () => {
+                        document.execCommand('insertUnorderedList', false, null);
+                    });
+                    
+                    document.getElementById('btn-numbered').addEventListener('click', () => {
+                        document.execCommand('insertOrderedList', false, null);
+                    });
+                    
+                    // Manejar la selección de encabezados
+                    document.getElementById('heading-select').addEventListener('change', function() {
+                        const value = this.value;
+                        if (value === 'p') {
+                            document.execCommand('formatBlock', false, 'p');
+                        } else {
+                            document.execCommand('formatBlock', false, value);
+                        }
+                    });
+                    
+                    // Manejar la subida de imágenes
+                    document.getElementById('btn-image').addEventListener('click', function() {
+                        document.getElementById('image-input').click();
+                    });
+                    
+                    document.getElementById('image-input').addEventListener('change', function(e) {
+                        const file = e.target.files[0];
+                        if (file) {
+                            const reader = new FileReader();
+                            reader.onload = function(event) {
+                                document.execCommand('insertImage', false, event.target.result);
+                            };
+                            reader.readAsDataURL(file);
+                        }
+                    });
+                    
+                    // Enviar el contenido de vuelta a Streamlit cuando cambia
+                    editorContent.addEventListener('input', function() {
+                        // Intentar enviar el contenido a Streamlit
+                        try {
+                            window.parent.postMessage({
+                                type: 'streamlit:setComponentValue',
+                                value: getEditorHtml()
+                            }, '*');
+                        } catch(e) {
+                            console.error('Error al enviar datos a Streamlit:', e);
+                        }
+                    });
+                </script>
+            </body>
+            </html>
+            """.replace('CONTENT_PLACEHOLDER', content.replace('`', '\\`').replace("'", "\\'").replace('"', '\\"'))
+            
+            # Mostrar el editor
+            if 'cv_edited_html' not in st.session_state:
+                st.session_state.cv_edited_html = ""
+            
+            editor_result = components.html(editor_html, height=500, scrolling=True)
+            
+            # Campo oculto para guardar el HTML resultante
+            if editor_result:
+                st.session_state.cv_edited_html = editor_result
+            
+            # Botones para guardar y cancelar
+            col1, col2, col3 = st.columns([2,2,6])
+            with col1:
+                if st.button("💾 Guardar", use_container_width=True):
+                    try:
+                        # Convertir HTML a Markdown básico
+                        html_content = st.session_state.cv_edited_html
+                        if not html_content:
+                            st.error("No hay contenido para guardar")
+                        else:
+                            soup = BeautifulSoup(html_content, 'html.parser')
+                            
+                            # Procesar las imágenes (base64)
+                            for img in soup.find_all('img'):
+                                if img.get('src', '').startswith('data:image'):
+                                    # Extraer datos base64
+                                    img_data = img['src'].split(',')[1]
+                                    img_data = base64.b64decode(img_data)
+                                    img_obj = Image.open(io.BytesIO(img_data))
+                                    
+                                    # Guardar imagen
+                                    img_path = os.path.join(
+                                        os.path.dirname(st.session_state.tailored_cv_path),
+                                        f"{Path(st.session_state.tailored_cv_path).stem}_img_{len(os.listdir(os.path.dirname(st.session_state.tailored_cv_path)))}.png"
+                                    )
+                                    img_obj.save(img_path)
+                                    
+                                    # Actualizar la ruta en el HTML
+                                    img['src'] = os.path.basename(img_path)
+                            
+                            # Guardar el HTML modificado
+                            with open(st.session_state.tailored_cv_path.replace('.md', '.html'), 'w', encoding='utf-8') as f:
+                                f.write(str(soup))
+                            
+                            # También guardar una versión markdown para compatibilidad
+                            # Implementación simplificada
+                            markdown_content = str(soup)
+                            markdown_content = re.sub(r'<h1>(.*?)</h1>', r'# \1', markdown_content)
+                            markdown_content = re.sub(r'<h2>(.*?)</h2>', r'## \1', markdown_content)
+                            markdown_content = re.sub(r'<h3>(.*?)</h3>', r'### \1', markdown_content)
+                            markdown_content = re.sub(r'<strong>(.*?)</strong>', r'**\1**', markdown_content)
+                            markdown_content = re.sub(r'<em>(.*?)</em>', r'*\1*', markdown_content)
+                            markdown_content = re.sub(r'<img src="(.*?)" alt="(.*?)">', r'![\2](\1)', markdown_content)
+                            
+                            with open(st.session_state.tailored_cv_path, 'w', encoding='utf-8') as f:
+                                f.write(markdown_content)
+                            
+                            st.success("✅ CV guardado correctamente")
+                            st.session_state.cv_edit_mode = "Vista"
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al guardar: {str(e)}")
+            
+            with col2:
+                if st.button("❌ Cancelar", use_container_width=True):
+                    st.session_state.cv_edit_mode = "Vista"
+                    st.rerun()
 
         # Comparación de scores
         st.subheader("📊 Comparación de Scores")
