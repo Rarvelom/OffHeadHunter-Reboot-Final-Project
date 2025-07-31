@@ -97,7 +97,7 @@ if st.session_state.step == 1:
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        st.subheader("💬 Chatbot")
+        st.subheader("Chatbot")
 
         # --- CSS dinámico para ventana scrollable        # Estilos para el chat con mejor soporte para auto-scroll
         st.markdown("""
@@ -238,7 +238,7 @@ if st.session_state.step == 1:
             st.success(f"CV cargado: {uploaded_cv.name}")
 
     if st.session_state.finished_chat and st.session_state.cv_path:
-        if st.button("➡️ Continuar a scraping de ofertas"):
+        if st.button("Continuar con la búsqueda de ofertas"):
             st.session_state.step = 2
             st.rerun()
 
@@ -274,9 +274,11 @@ elif st.session_state.step == 2:
         st.session_state.job_offers = scrape_jobs(st.session_state.search_url)
 
     offers = st.session_state.job_offers
+    st.info(f"{len(offers)} ofertas encontradas")
+    
     if not offers:
         st.warning("No se encontraron ofertas. Intenta con otros criterios.")
-        if st.button("🔄 Reiniciar"):
+        if st.button("Reiniciar"):
             st.session_state.clear()
             st.rerun()
 
@@ -322,7 +324,7 @@ elif st.session_state.step == 2:
                 selected_indices.append(idx)
 
     if selected_indices:
-        if st.button("➡️ Procesar ofertas seleccionadas"):
+        if st.button("Procesar ofertas seleccionadas"):
             st.session_state.selected_offers = [offers[i] for i in selected_indices]
             st.session_state.exported_jobs = []
 
@@ -345,16 +347,21 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.header("Paso 3: Matching CV ↔ Ofertas")
 
+    def split_job_id(job_id: str):
+        """Devuelve (source_id, external_id) a partir de job_id de Qdrant."""
+        if "-i" in job_id:
+            parts = job_id.split("-i")
+            return parts[0], "i" + parts[1]
+        return job_id, None
+
     if 'matching_results' not in st.session_state:
         st.info("🔄 Procesando documentos y generando embeddings...")
 
         cv_path = st.session_state.cv_path
         cv_id = Path(cv_path).stem
 
-        # Inicializar TextProcessor y QdrantStorage una sola vez
         text_processor = TextProcessor()
         job_storage = QdrantStorage(collection_name='job_embeddings_BGE2')
-
         newly_processed_job_ids = []
 
         def process_job(job_meta):
@@ -373,7 +380,6 @@ elif st.session_state.step == 3:
                 return Path(result.get('file_name', '')).stem
             return None
 
-        # Procesar ofertas en paralelo
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = [executor.submit(process_job, job_meta) for job_meta in st.session_state.exported_jobs]
             for future in concurrent.futures.as_completed(futures):
@@ -383,7 +389,6 @@ elif st.session_state.step == 3:
 
         st.session_state.job_ids = newly_processed_job_ids
 
-        # Matching
         st.info("🔍 Ejecutando matching...")
         qdrant_client = get_qdrant_client()
         results = match_cv_to_jobs(
@@ -395,23 +400,75 @@ elif st.session_state.step == 3:
         )
         st.session_state.matching_results = results
 
-    # Mostrar resultados
     if st.session_state.matching_results:
         st.subheader("Resultados de Matching")
-        choices = []
-        for res in st.session_state.matching_results:
+
+        selected_offer_idx = None
+
+        for idx, res in enumerate(st.session_state.matching_results):
             job_id = res['job_id']
             score = res['score']
-            choices.append(f"{job_id} (Score: {score:.2f})")
+            source_id, external_id = split_job_id(job_id)
 
-        selected = st.radio("Selecciona una oferta para adaptar tu CV:", choices)
-        if selected and st.button("➡️ Adaptar CV"):
-            st.session_state.selected_job_for_tailoring = selected.split(" (Score")[0]
-            st.session_state.initial_score = float(selected.split("Score: ")[1][:-1])
+            # Buscar la oferta original usando source_id + external_id
+            offer_data = next(
+                (
+                    o for o in st.session_state.selected_offers
+                    if o.get('source_id') == source_id and o.get('external_id') == external_id
+                ),
+                None
+            )
+            if not offer_data:
+                continue
+
+            with st.expander(f"{offer_data.get('title', 'Sin título')} – {offer_data.get('company', 'Empresa')}"):
+                st.markdown(
+                    f"<p style='font-size:20px; color:#4CAF50;'><b>Match Score:</b> {score:.2f}</p>",
+                    unsafe_allow_html=True
+                )
+                st.markdown(f"**Descripción:** {offer_data.get('description', '')[:250]}...")
+                st.markdown(f"**Ubicación:** {', '.join(offer_data.get('locations', []))}")
+
+                tags = offer_data.get('tags', [])
+                if tags:
+                    inverted_tags = list(reversed(tags))
+                    st.markdown(f"**Modalidad:** {', '.join(inverted_tags)}")
+
+                salary = offer_data.get('salary_range')
+                if salary:
+                    min_salary = salary.get('min')
+                    max_salary = salary.get('max')
+                    currency = salary.get('currency', 'EUR')
+                    if min_salary is not None and max_salary is not None:
+                        st.markdown(f"**Salario:** {min_salary} - {max_salary} {currency}")
+                    elif min_salary is not None:
+                        st.markdown(f"**Salario:** Desde {min_salary} {currency}")
+                    elif max_salary is not None:
+                        st.markdown(f"**Salario:** Hasta {max_salary} {currency}")
+
+                url = offer_data.get('url')
+                if url:
+                    st.markdown(f"[🔗 Ver oferta original]({url})", unsafe_allow_html=True)
+
+                if st.radio(
+                    "Seleccionar esta oferta",
+                    options=[False, True],
+                    index=0,
+                    key=f"match_radio_{idx}",
+                    horizontal=True,
+                    label_visibility="collapsed"
+                ):
+                    selected_offer_idx = idx
+
+        if selected_offer_idx is not None and st.button("Adaptar CV"):
+            chosen_res = st.session_state.matching_results[selected_offer_idx]
+            st.session_state.selected_job_for_tailoring = chosen_res['job_id']
+            st.session_state.initial_score = chosen_res['score']
             st.session_state.step = 4
             st.rerun()
     else:
         st.error("❌ No se encontraron resultados de matching.")
+
 
 # ====================================
 #   Paso 4: Tailoring + Comparación
@@ -520,7 +577,7 @@ elif st.session_state.step == 4:
         """, unsafe_allow_html=True)
         
         # Botón de descarga PDF
-        if st.button("📥 Descargar CV como PDF"):
+        if st.button("Descargar CV como PDF"):
             # Crear un nombre de archivo limpio
             filename = os.path.basename(str(st.session_state.tailored_cv_path)).replace('.md', '.pdf')
             
@@ -595,6 +652,6 @@ elif st.session_state.step == 4:
         col1.metric("Score Original", f"{initial_score:.2f}")
         col2.metric("Score Adaptado", f"{new_score:.2f}")
 
-        if st.button("🔄 Reiniciar"):
+        if st.button("Reiniciar"):
             st.session_state.clear()
             st.rerun()
