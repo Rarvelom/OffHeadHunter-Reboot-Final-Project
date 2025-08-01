@@ -2,7 +2,7 @@ import sys
 import os
 import subprocess
 from pathlib import Path
-import json
+import time
 from job_agent_chatbot import AgentChatbot
 from job_search_agent import JobSearchAgent
 from src.url_gen import generar_url_infojobs
@@ -85,6 +85,11 @@ def select_jobs_interactively(job_offers: list) -> list:
             
     return selected_offers
 
+def get_base64(file_path):
+    with open(file_path, "rb") as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
 # --- Estado inicial ---
 if 'step' not in st.session_state:
     st.session_state.step = 1
@@ -92,30 +97,66 @@ if 'step' not in st.session_state:
     st.session_state.cv_path = None
 
 st.set_page_config(page_title="OffHeadHunter", layout="wide")
-st.title("🎯 OffHeadHunter - Pipeline Laboral")
+# st.title("OffHeadHunter - Pipeline Laboral")
+st.image("logo.png", width=450)  # puedes ajustar el tamaño
+
+background_img = get_base64("background.png")
+
+st.markdown(f"""
+    <style>
+    .stApp {{
+        background-image: linear-gradient(rgba(255,255,255,0.5), rgba(255,255,255,0.5)), url("data:image/png;base64,{background_img}");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+st.markdown("""
+    <style>
+    .stButton button {
+        background-color: #ea833d;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        font-size: 24px;
+        font-weight: 800;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: 0.3s;
+    }
+    .stButton button:hover {
+        background-color: #BF6C32;
+        color: white;
+        font-weight: 800;
+        font-size: 24px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # ====================================
 #   Paso 1: Chat + Upload CV
 # ====================================
 if st.session_state.step == 1:
-    st.header("Paso 1: Conversa con el asistente y sube tu CV")
+    st.header("Your new job starts here")
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        st.subheader("Chatbot")
-
-        # --- CSS dinámico para ventana scrollable        # Estilos para el chat con mejor soporte para auto-scroll
+        # ✅ Estilo CSS para la ventana del chat
         st.markdown("""
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap');
         .chat-window {
-            height: 50vh;
+            height: 60vh;
             min-height: 200px;
             max-height: 70vh;
             overflow-y: auto;
             padding: 10px;
-            border: 1px solid #444;
+            background-color: #ffffff;
+            border: 1px solid #ea833d;
             border-radius: 8px;
-            background-color: #1e1e1e;
+            box-shadow: 0 8px 8px rgba(0, 0, 0, 0.2); /* X-offset, Y-offset, blur, color */
             margin-bottom: 10px;
             scroll-behavior: smooth;
             display: flex;
@@ -126,6 +167,7 @@ if st.session_state.step == 1:
             display: flex;
             flex-direction: column;
             overflow-y: auto;
+            
         }
         .chat-bottom {
             float: left;
@@ -133,26 +175,41 @@ if st.session_state.step == 1:
             height: 0px;
         }
         .user-msg {
-            color: #ffd;
-            background-color: #2a6f97;
+            font-family: 'Montserrat', sans-serif;
+            font-size: 16px;
+            font-weight: 500;
+            color: #000000;
+            background-color: #ffccff50;
             padding: 6px 10px;
             border-radius: 6px;
             margin-bottom: 4px;
             width: fit-content;
             max-width: 80%;
             align-self: flex-end;
+            margin-bottom: 20px;
         }
         .bot-msg {
-            color: #ffd;
-            background-color: #444;
+            font-family: 'Montserrat', sans-serif;
+            font-size: 16px;
+            font-weight: 500;
+            color: #000000;
+            background-color: #ffcc9930;
             padding: 6px 10px;
             border-radius: 6px;
             margin-bottom: 4px;
             width: fit-content;
             max-width: 80%;
             align-self: flex-start;
+            margin-bottom: 20px;
+        }
+        div[data-testid="stFileDropzone"] {
+            background-color: white !important;
         }
         </style>
+        <script>
+        var chatWindow = document.getElementById('chat-window');
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+        </script>
         """, unsafe_allow_html=True)
 
         if 'chatbot' not in st.session_state:
@@ -160,38 +217,6 @@ if st.session_state.step == 1:
             st.session_state.chat, st.session_state.chat_history = st.session_state.chatbot.start_session()
             st.session_state.finished_chat = False
 
-        # ✅ Estilo CSS para la ventana del chat
-        st.markdown("""
-        <style>
-        .chat-window {
-            height: 50vh;
-            min-height: 200px;
-            max-height: 70vh;
-            overflow-y: auto;
-            padding: 10px;
-            border: 1px solid #444;
-            border-radius: 8px;
-            background-color: #1e1e1e;
-            margin-bottom: 10px;
-            scroll-behavior: smooth;
-        }
-        .user-msg {
-            color: #ffd;
-            background-color: #2a6f97;
-            padding: 6px 10px;
-            border-radius: 6px;
-            margin-bottom: 4px;
-        }
-        .bot-msg {
-            color: #ffd;
-            background-color: #444;
-            padding: 6px 10px;
-            border-radius: 6px;
-            margin-bottom: 4px;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
         # ✅ Historial renderizado como HTML dentro del contenedor con auto-scroll
         chat_html = '''
         <div class="chat-window" id="chat-window">
@@ -199,26 +224,15 @@ if st.session_state.step == 1:
         
         for role, msg in st.session_state.chat_history:
             if role == "Usuario":
-                chat_html += f'<div class="user-msg">👤 {msg}</div>'
+                chat_html += f'<div class="user-msg">{msg}</div>'
             else:
-                chat_html += f'<div class="bot-msg">🤖 {msg}</div>'
+                chat_html += f'<div class="bot-msg">{msg}</div>'
                 
         chat_html += '''
         </div>
         '''
         
         st.markdown(chat_html, unsafe_allow_html=True)
-        
-        # Auto-scroll implementation with direct JavaScript
-        st.markdown("""
-        <script>
-        // Auto-scroll to bottom of chat window
-        var chatWindow = document.getElementById('chat-window');
-        if (chatWindow) {
-            chatWindow.scrollTop = chatWindow.scrollHeight;
-        }
-        </script>
-        """, unsafe_allow_html=True)
 
         # ✅ Input debajo
         if not st.session_state.finished_chat:
@@ -232,8 +246,24 @@ if st.session_state.step == 1:
                 st.rerun()
 
     with col2:
-        st.subheader("📄 Sube tu CV")
-        uploaded_cv = st.file_uploader("Selecciona tu CV (PDF o DOCX)", type=["pdf", "docx"])
+        st.subheader("Upload your CV")
+        uploaded_cv = st.file_uploader("Select your CV (PDF or DOCX)", type=["pdf", "docx"])
+        st.markdown("""
+        <style>
+        /* Contenedor del uploader */
+        .stFileUploader {
+            background-color: #ffffff;
+            padding: 15px;
+            border-radius: 10px;
+        }
+        /* Texto dentro del uploader */
+        .stFileUploader label {
+            font-weight: bold;
+            color: #000000;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
         if uploaded_cv:
             tmp_dir = tempfile.gettempdir()
             cv_path = Path(tmp_dir) / uploaded_cv.name
@@ -250,17 +280,44 @@ if st.session_state.step == 1:
 # ====================================
 #   Paso 2: Scraping + selección
 # ====================================
-elif st.session_state.step == 2:
-    st.header("Paso 2: Ofertas encontradas")
 
-    # ✅ 1. Parsear historial de chat a JSON con JobSearchAgent
+elif st.session_state.step == 2:
+    st.header("Searching for job offers")
+
+    # === Estilos base para las tarjetas ===
+    st.markdown("""
+    <style>
+    .custom-card {
+        border-radius: 10px;
+        margin-bottom: 12px;
+        padding: 12px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+        transition: background-color 0.3s ease, border 0.3s ease;
+    }
+    .custom-title {
+        font-weight: bold;
+        font-size: 24px;
+        margin-bottom: 6px;
+    }
+    .custom-desc {
+        font-size: 14px;
+        color: #333333;
+        margin-bottom: 6px;
+    }
+    .custom-meta {
+        font-size: 13px;
+        color: #555555;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ✅ 1. Construir URL personalizada si no existe
     if 'search_url' not in st.session_state:
         st.info("🔍 Analizando la conversación para construir la búsqueda personalizada...")
         agent = JobSearchAgent()
         history_text = "\n".join([f"{role}: {msg}" for role, msg in st.session_state.chat_history])
-        user_profile = agent.parse_profile_from_text(history_text)  # <-- Devuelve JSON con campos
+        user_profile = agent.parse_profile_from_text(history_text)
 
-        # ✅ 2. Construir URL personalizada de InfoJobs
         puesto = user_profile.get('job_title')
         modalidad = user_profile.get('work_modality')
         salario_min = user_profile.get('salary_expectation')
@@ -273,14 +330,14 @@ elif st.session_state.step == 2:
             localidades=localidades
         )
 
-    # ✅ 3. Scraping usando la URL generada
+    # ✅ 2. Scraping si no hay ofertas todavía
     if 'job_offers' not in st.session_state:
         st.info(f"🌐 Buscando ofertas en InfoJobs para: {st.session_state.search_url}")
         st.session_state.job_offers = scrape_jobs(st.session_state.search_url)
 
     offers = st.session_state.job_offers
     st.info(f"{len(offers)} ofertas encontradas")
-    
+
     if not offers:
         st.warning("No se encontraron ofertas. Intenta con otros criterios.")
         if st.button("Reiniciar"):
@@ -290,50 +347,61 @@ elif st.session_state.step == 2:
     st.write("Selecciona las ofertas que te interesen:")
 
     selected_indices = []
+
+    # === Renderizado de tarjetas personalizadas ===
     for idx, offer in enumerate(offers):
-        with st.expander(f"{offer.get('title', 'Sin título')} – {offer.get('company', 'Empresa')}"):
-            # --- Descripción ---
-            st.markdown(f"**Descripción:** {offer.get('description', '')[:250]}...")
 
-            # --- Ubicación ---
-            st.markdown(f"**Ubicación:** {', '.join(offer.get('locations', []))}")
+        # Estado actual de la tarjeta
+        is_checked = st.session_state.get(f"offer_{idx}", False)
+        bg_color = "#ffcc9990" if is_checked else "#f8faff98"
+        border_color = "#df0c9e85" if is_checked else "#ea833d"
 
-            # --- Modalidad (tags invertidos) ---
-            tags = offer.get('tags', [])
-            if tags:
-                # Invertir orden si hay elementos
-                inverted_tags = list(reversed(tags))
-                st.markdown(f"**Modalidad:** {', '.join(inverted_tags)}")
+        # Información de la oferta
+        title = offer.get('title', 'Sin título')
+        company = offer.get('company', 'Empresa')
+        description = offer.get('description', '')[:250]
+        location = ", ".join(offer.get('locations', []))
+        tags = offer.get('tags', [])
+        tags_text = ", ".join(reversed(tags)) if tags else "No especificado"
 
-            # --- Salario (rango) ---
-            salary = offer.get('salary_range')
-            if salary:
-                min_salary = salary.get('min')
-                max_salary = salary.get('max')
-                currency = salary.get('currency', 'EUR')
-                if min_salary is not None and max_salary is not None:
-                    st.markdown(f"**Salario:** {min_salary} - {max_salary} {currency}")
-                elif min_salary is not None:
-                    st.markdown(f"**Salario:** Desde {min_salary} {currency}")
-                elif max_salary is not None:
-                    st.markdown(f"**Salario:** Hasta {max_salary} {currency}")
+        salary = offer.get('salary_range')
+        salary_text = "No especificado"
+        if salary:
+            min_salary = salary.get('min')
+            max_salary = salary.get('max')
+            currency = salary.get('currency', 'EUR')
+            if min_salary and max_salary:
+                salary_text = f"{min_salary} - {max_salary} {currency}"
+            elif min_salary:
+                salary_text = f"Desde {min_salary} {currency}"
+            elif max_salary:
+                salary_text = f"Hasta {max_salary} {currency}"
 
-            # --- URL clicable ---
-            url = offer.get('url')
-            if url:
-                st.markdown(f"[🔗 Ver oferta original]({url})", unsafe_allow_html=True)
+        url = offer.get('url')
 
-            # --- Checkbox selección ---
-            checked = st.checkbox("Seleccionar", key=f"offer_{idx}")
-            if checked:
-                selected_indices.append(idx)
+        checked = st.checkbox("Seleccionar", key=f"offer_{idx}")
 
+        # Tarjeta renderizada
+        st.markdown(f"""
+        <div class="custom-card" style="background-color:{bg_color}; border:2px solid {border_color};">
+            <div class="custom-title">{title} – {company}</div>
+            <div class="custom-desc">{description}...</div>
+            <div class="custom-meta"><strong>Ubicación:</strong> {location}</div>
+            <div class="custom-meta"><strong>Modalidad:</strong> {tags_text}</div>
+            <div class="custom-meta"><strong>Salario:</strong> {salary_text}</div>
+            {'<a href="'+url+'" target="_blank">🔗 Ver oferta original</a>' if url else ''}
+        </div>
+        """, unsafe_allow_html=True)
+
+        if checked:
+            selected_indices.append(idx)
+
+    # === Botón procesar ofertas ===
     if selected_indices:
         if st.button("Procesar ofertas seleccionadas"):
             st.session_state.selected_offers = [offers[i] for i in selected_indices]
             st.session_state.exported_jobs = []
 
-            # --- Exportar a PDF y MongoDB ---
             for offer in st.session_state.selected_offers:
                 result = export_ij_offer_to_pdf(offer, output_dir="uploads/job_descriptions")
                 if result and result.get('success'):
@@ -347,10 +415,10 @@ elif st.session_state.step == 2:
                 st.error("No se pudo exportar ninguna oferta. Intenta de nuevo.")
 
 # ====================================
-#   Paso 3: Procesar PDFs y Matching
+#   Paso 3: Procesar PDFs y Matching (con tarjetas)
 # ====================================
 elif st.session_state.step == 3:
-    st.header("Paso 3: Matching CV ↔ Ofertas")
+    st.header("Matching Scores with your CV")
 
     def split_job_id(job_id: str):
         """Devuelve (source_id, external_id) a partir de job_id de Qdrant."""
@@ -358,6 +426,42 @@ elif st.session_state.step == 3:
             parts = job_id.split("-i")
             return parts[0], "i" + parts[1]
         return job_id, None
+
+
+    # === Estilos de tarjetas ===
+    st.markdown("""
+    <style>
+    .match-card {
+        border-radius: 10px;
+        margin-bottom: 12px;
+        padding: 14px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.08);
+        background-color: #f8faff98;
+        transition: background-color 0.3s ease, border 0.3s ease;
+        border: 2px solid #ea833d;
+    }
+    .match-card:hover {
+        filter: brightness(0.97);
+    }
+    .match-title {
+        font-weight: bold;
+        font-size: 24px;
+        margin-bottom: 6px;
+        color: #000000;
+    }
+    .match-score {
+        font-size: 18px;
+        color: #DE4A28;
+        font-weight: bold;
+        margin-bottom: 8px;
+    }
+    .match-meta {
+        font-size: 13px;
+        color: #444444;
+        margin-bottom: 4px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     if 'matching_results' not in st.session_state:
         st.info("🔄 Procesando documentos y generando embeddings...")
@@ -406,7 +510,7 @@ elif st.session_state.step == 3:
         st.session_state.matching_results = results
 
     if st.session_state.matching_results:
-        st.subheader("Resultados de Matching")
+        st.subheader("Results")
 
         selected_offer_idx = None
 
@@ -415,7 +519,6 @@ elif st.session_state.step == 3:
             score = res['score']
             source_id, external_id = split_job_id(job_id)
 
-            # Buscar la oferta original usando source_id + external_id
             offer_data = next(
                 (
                     o for o in st.session_state.selected_offers
@@ -426,44 +529,32 @@ elif st.session_state.step == 3:
             if not offer_data:
                 continue
 
-            with st.expander(f"{offer_data.get('title', 'Sin título')} – {offer_data.get('company', 'Empresa')}"):
-                st.markdown(
-                    f"<p style='font-size:20px; color:#4CAF50;'><b>Match Score:</b> {score:.2f}</p>",
-                    unsafe_allow_html=True
-                )
-                st.markdown(f"**Descripción:** {offer_data.get('description', '')[:250]}...")
-                st.markdown(f"**Ubicación:** {', '.join(offer_data.get('locations', []))}")
+            # === Tarjeta personalizada ===
+            st.markdown(f"""
+            <div class="match-card">
+                <div class="match-score">Match Score: {score:.2f}</div>
+                <div class="match-title">{offer_data.get('title', 'Sin título')} – {offer_data.get('company', 'Empresa')}</div>
+                <div class="match-meta"><strong>Descripción:</strong> {offer_data.get('description', '')[:250]}...</div>
+                <div class="match-meta"><strong>Ubicación:</strong> {', '.join(offer_data.get('locations', []))}</div>
+                <div class="match-meta"><strong>Modalidad:</strong> {', '.join(reversed(offer_data.get('tags', [])))} </div>
+                <div class="match-meta"><strong>Salario:</strong> {
+                    f"{offer_data['salary_range'].get('min', '')} - {offer_data['salary_range'].get('max', '')} {offer_data['salary_range'].get('currency', 'EUR')}"
+                    if offer_data.get('salary_range') else 'No especificado'
+                }</div>
+                {'<a href="'+offer_data.get("url", "")+'" target="_blank">🔗 Ver oferta original</a>' if offer_data.get("url") else ''}
+            </div>
+            """, unsafe_allow_html=True)
 
-                tags = offer_data.get('tags', [])
-                if tags:
-                    inverted_tags = list(reversed(tags))
-                    st.markdown(f"**Modalidad:** {', '.join(inverted_tags)}")
-
-                salary = offer_data.get('salary_range')
-                if salary:
-                    min_salary = salary.get('min')
-                    max_salary = salary.get('max')
-                    currency = salary.get('currency', 'EUR')
-                    if min_salary is not None and max_salary is not None:
-                        st.markdown(f"**Salario:** {min_salary} - {max_salary} {currency}")
-                    elif min_salary is not None:
-                        st.markdown(f"**Salario:** Desde {min_salary} {currency}")
-                    elif max_salary is not None:
-                        st.markdown(f"**Salario:** Hasta {max_salary} {currency}")
-
-                url = offer_data.get('url')
-                if url:
-                    st.markdown(f"[🔗 Ver oferta original]({url})", unsafe_allow_html=True)
-
-                if st.radio(
-                    "Seleccionar esta oferta",
-                    options=[False, True],
-                    index=0,
-                    key=f"match_radio_{idx}",
-                    horizontal=True,
-                    label_visibility="collapsed"
-                ):
-                    selected_offer_idx = idx
+            # ✅ Radio debajo de la tarjeta para seleccionar
+            if st.radio(
+                "Seleccionar esta oferta",
+                options=[False, True],
+                index=0,
+                key=f"match_radio_{idx}",
+                horizontal=True,
+                label_visibility="collapsed"
+            ):
+                selected_offer_idx = idx
 
         if selected_offer_idx is not None and st.button("Adaptar CV"):
             chosen_res = st.session_state.matching_results[selected_offer_idx]
@@ -475,11 +566,12 @@ elif st.session_state.step == 3:
         st.error("❌ No se encontraron resultados de matching.")
 
 
+
 # ====================================
 #   Paso 4: Tailoring + Comparación
 # ====================================
 elif st.session_state.step == 4:
-    st.header("Paso 4: CV Adaptado y Comparación de Scores")
+    st.header("Check your tailored CV")
 
     cv_path = st.session_state.cv_path
     cv_id = Path(cv_path).stem
@@ -526,7 +618,7 @@ elif st.session_state.step == 4:
         new_score = rematch_data[0]['score'] if rematch_data else 0.0
 
         # Vista previa CV
-        st.subheader("📄 Vista previa CV Adaptado")
+        st.subheader("Preview")
         
         # Leer el contenido del CV adaptado
         try:
@@ -643,7 +735,7 @@ elif st.session_state.step == 4:
         # Botones para cambiar entre vista y edición
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("📄 Vista previa", use_container_width=True, 
+            if st.button("Vista previa", use_container_width=True, 
                          disabled=st.session_state.cv_edit_mode == "Vista"):
                 st.session_state.cv_edit_mode = "Vista"
                 st.rerun()
@@ -671,7 +763,7 @@ elif st.session_state.step == 4:
                 st.text_area("Contenido CV Adaptado", content, height=300)
         else:
             # Modo de edición sencillo
-            st.subheader("✏️ Editor de CV")
+            st.subheader("Editor de CV")
             
             # Editor visual sencillo estilo Word/Docs
             editor_html = """
@@ -894,7 +986,7 @@ elif st.session_state.step == 4:
                     st.rerun()
 
         # Comparación de scores
-        st.subheader("📊 Comparación de Scores")
+        st.subheader("Compare your new match score")
         col1, col2 = st.columns(2)
         col1.metric("Score Original", f"{initial_score:.2f}")
         col2.metric("Score Adaptado", f"{new_score:.2f}")
