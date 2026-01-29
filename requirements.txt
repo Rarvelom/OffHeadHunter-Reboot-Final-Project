@@ -114,3 +114,8 @@ wsproto==1.2.0
 google-generativeai>=0.3.0,<1.0.0  # Añadido para soporte de embeddings de Google
 streamlit
 unstructured[pdf]
+undetected-chromedriver==3.5.5
+PyMuPDF==1.26.7
+tiktoken==0.12.0
+reportlab==4.4.9
+PyPDF2==3.0.1
